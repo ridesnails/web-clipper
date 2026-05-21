@@ -133,11 +133,7 @@ describe('markdownToTelegraphNodes', () => {
 		const result = markdownToTelegraphNodes('Visit [my site](https://example.com) now');
 		expect(result).toHaveLength(1);
 		expect(result[0].tag).toBe('p');
-		expect(result[0].children).toEqual([
-			'Visit ',
-			{ tag: 'a', attrs: { href: 'https://example.com' }, children: ['my site'] },
-			' now',
-		]);
+		expect(result[0].children).toEqual(['Visit ', { tag: 'a', attrs: { href: 'https://example.com' }, children: ['my site'] }, ' now']);
 	});
 
 	it('多段落输入 → 返回多个节点', () => {
@@ -155,11 +151,48 @@ describe('markdownToTelegraphNodes', () => {
 		expect(markdownToTelegraphNodes('   ')).toEqual([]);
 	});
 
-	it('不支持的表格 → 转为代码块处理（当前 stub 行为）', () => {
-		const md = '| col1 | col2 |\n|------|------|\n| a    | b    |';
-		const result = markdownToTelegraphNodes(md);
-		// 表格行会被当作普通段落处理（stub 的简化行为）
-		expect(result.length).toBeGreaterThan(0);
-		expect(result.every((n) => n.tag === 'p')).toBe(true);
+	it('GFM 表格转为 table 标签', () => {
+		const md = '| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |';
+		const nodes = markdownToTelegraphNodes(md);
+		expect(nodes).toHaveLength(1);
+		expect(nodes[0].tag).toBe('table');
+		expect(nodes[0].children).toHaveLength(3); // 1 header + 2 data rows
+		expect(nodes[0].children[0].tag).toBe('tr');
+		expect(nodes[0].children[0].children[0].tag).toBe('th');
+		expect(nodes[0].children[0].children[0].children).toEqual(['Name']);
+		expect(nodes[0].children[1].children[0].tag).toBe('td');
+		expect(nodes[0].children[1].children[0].children).toEqual(['Alice']);
+	});
+
+	it('空文本链接 [](url) 被过滤', () => {
+		const md = 'Heading [](http://example.com) text';
+		const nodes = markdownToTelegraphNodes(md);
+		const p = nodes[0];
+		expect(p.tag).toBe('p');
+		// 不应该包含 a 标签
+		const hasLink = p.children.some((child) => typeof child === 'object' && child.tag === 'a');
+		expect(hasLink).toBe(false);
+		// 文本应该包含 "Heading" 和 "text"
+		const text = p.children.filter((c) => typeof c === 'string').join('');
+		expect(text).toContain('Heading');
+		expect(text).toContain('text');
+	});
+
+	it('零宽空格链接 [\u200B](url) 被过滤', () => {
+		const md = 'Test [\u200B](http://example.com) end';
+		const nodes = markdownToTelegraphNodes(md);
+		const p = nodes[0];
+		const hasLink = p.children.some((child) => typeof child === 'object' && child.tag === 'a');
+		expect(hasLink).toBe(false);
+	});
+
+	it('非空链接 [text](url) 正常保留', () => {
+		const md = 'Click [here](http://example.com) now';
+		const nodes = markdownToTelegraphNodes(md);
+		const p = nodes[0];
+		const link = p.children.find((child) => typeof child === 'object' && child.tag === 'a');
+		expect(link).toBeDefined();
+		expect(link.attrs.href).toBe('http://example.com');
+		expect(link.children).toEqual(['here']);
 	});
 });
