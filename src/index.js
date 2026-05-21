@@ -1,3 +1,6 @@
+import { sendPhoto, sendMessage, getFile } from './telegram.js';
+import { createPage, markdownToTelegraphNodes } from './telegraph.js';
+
 // CORS 响应头
 function corsHeaders(env) {
 	return {
@@ -14,6 +17,29 @@ export default {
 		// 浏览器自动请求的 favicon.ico 直接返回 204，避免日志噪音
 		if (pathname === '/favicon.ico') {
 			return new Response(null, { status: 204 });
+		}
+
+		// Telegraph 图片代理：将 Telegram file_id 转为可直接访问的图片 URL
+		if (pathname === '/image-proxy') {
+			const fileId = new URL(request.url).searchParams.get('file_id');
+			if (!fileId) {
+				return Response.json({ error: 'Missing file_id' }, { status: 400 });
+			}
+			try {
+				const fileInfo = await getFile(fileId, env);
+				const fileRes = await fetch(fileInfo.file_url, { signal: AbortSignal.timeout(15000) });
+				if (!fileRes.ok) {
+					return Response.json({ error: 'Image fetch failed' }, { status: 502 });
+				}
+				return new Response(fileRes.body, {
+					headers: {
+						'Content-Type': fileRes.headers.get('Content-Type') || 'image/jpeg',
+						'Cache-Control': 'public, max-age=86400',
+					},
+				});
+			} catch (e) {
+				return Response.json({ error: e.message }, { status: 502 });
+			}
 		}
 
 		// 处理 CORS 预检请求
@@ -114,12 +140,67 @@ export default {
 				console.error('FNS write failed:', path, JSON.stringify(fnsData));
 				return Response.json({ error: `FNS write failed: ${JSON.stringify(fnsData)}` }, { status: 502, headers: corsHeaders(env) });
 			}
+			// 在 FNS 成功之后，尝试 Telegraph + Telegram 推送
+			let telegraphUrl = null;
+			let telegramMessageId = null;
+
+			if (env.TELEGRAPH_ACCESS_TOKEN && env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+				try {
+					// 1. 从 cleanBody（Markdown 正文）中提取所有图片 URL
+					const imageUrls = extractImageUrls(cleanBody);
+
+					// 2. 下载每张图片并上传到 Telegram 频道，收集 file_id
+					const imageMappings = [];
+					for (const imgUrl of imageUrls) {
+						try {
+							const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
+							if (imgRes.ok) {
+								const buffer = new Uint8Array(await imgRes.arrayBuffer());
+								const uploadResult = await sendPhoto(buffer, 'image.jpg', env);
+								imageMappings.push({ original: imgUrl, file_id: uploadResult.file_id });
+							}
+						} catch (e) {
+							console.error('Image upload failed:', imgUrl, e.message);
+						}
+					}
+
+					// 3. 替换 cleanBody 中的图片 URL 为 Worker 代理链接
+					let telegraphMarkdown = cleanBody;
+					const origin = new URL(request.url).origin;
+					for (const mapping of imageMappings) {
+						const proxyUrl = `${origin}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}`;
+						telegraphMarkdown = telegraphMarkdown.replaceAll(mapping.original, proxyUrl);
+					}
+
+					// 4. 转换 Markdown 为 Telegraph Node 数组
+					const nodes = markdownToTelegraphNodes(telegraphMarkdown);
+
+					// 5. 创建 Telegraph 页面
+					const pageResult = await createPage(title, nodes, env);
+					telegraphUrl = pageResult.url;
+
+					// 6. 发送 Telegram 消息
+					const msgText = `<b>${escapeHtml(
+						title
+					)}</b>\n\n📄 <a href="${telegraphUrl}">Telegraph 页面</a>\n🔗 <a href="${url}">原文链接</a>`;
+					const msgResult = await sendMessage(msgText, env.TELEGRAM_CHAT_ID, env);
+					telegramMessageId = msgResult.message_id;
+
+					console.log('Telegraph/Telegram pushed:', telegraphUrl, telegramMessageId);
+				} catch (e) {
+					console.error('Telegraph/Telegram push failed:', e.message);
+					// 推送失败不影响主流程
+				}
+			}
+
 			console.log('Clipped:', title, '->', path);
 			return Response.json(
 				{
 					ok: true,
 					title: title,
 					path: path,
+					telegraphUrl: telegraphUrl || undefined,
+					telegramMessageId: telegramMessageId || undefined,
 				},
 				{ headers: corsHeaders(env) }
 			);
@@ -198,6 +279,22 @@ function buildNote({ title, url, date, body }) {
 	// YAML frontmatter 里的字符串需要转义双引号
 	const safeTitle = title.replace(/"/g, '\\"');
 	return `---\ntitle: "${safeTitle}"\nurl: ${url}\ndate: ${date}\nsource: clipper\n---\n\n${body}`;
+}
+
+// 从 Markdown 中提取所有图片 URL
+function extractImageUrls(md) {
+	const urls = [];
+	const regex = /!\[.*?\]\((https?:\/\/[^\s)]+)\)/g;
+	let match;
+	while ((match = regex.exec(md)) !== null) {
+		urls.push(match[1]);
+	}
+	return [...new Set(urls)]; // 去重
+}
+
+// HTML 特殊字符转义（用于 Telegram HTML parse_mode）
+function escapeHtml(str) {
+	return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 export { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote };
