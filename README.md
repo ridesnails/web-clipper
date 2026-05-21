@@ -48,7 +48,7 @@
 
 ```markdown
 ---
-title: "服务器与网站的开荒入坑"
+title: '服务器与网站的开荒入坑'
 url: https://blog.huan666.de/posts/server-website-getting-started
 date: 2026-05-14T15:18:39.538Z
 source: clipper
@@ -65,16 +65,16 @@ source: clipper
 
 **Headers**
 
-| Name | Required | Description |
-|---|---|---|
-| `Authorization` | ✅ | `Bearer <API_KEY>` |
-| `Content-Type` | ✅ | `application/json` |
+| Name            | Required | Description        |
+| --------------- | -------- | ------------------ |
+| `Authorization` | ✅       | `Bearer <API_KEY>` |
+| `Content-Type`  | ✅       | `application/json` |
 
 **Body**
 
 ```json
 {
-  "url": "https://example.com/article"
+	"url": "https://example.com/article"
 }
 ```
 
@@ -82,19 +82,33 @@ source: clipper
 
 ```json
 {
-  "ok": true,
-  "title": "Article Title",
-  "path": "Clippings/2026-05/Article-Title.md"
+	"ok": true,
+	"title": "Article Title",
+	"path": "Clippings/2026-05/Article-Title.md"
 }
 ```
 
 **Response（失败）**
 
-非 2xx 状态码 + 文本错误信息。常见状态码：
+非 2xx 状态码 + JSON 错误信息 `{ "error": "..." }`。常见状态码：
 
 - `400` —— 请求格式错误（URL 缺失、不是 http/https）
 - `401` —— `API_KEY` 错误或缺失
 - `502` —— Jina 抓取失败 / FNS 写入失败（详细信息在 `wrangler tail` 日志里）
+
+**CORS 支持**
+
+所有响应均包含 CORS 头，支持浏览器 Bookmarklet 直接调用：
+
+- `Access-Control-Allow-Origin: *`
+- `Access-Control-Allow-Methods: GET, POST, OPTIONS`
+- `Access-Control-Allow-Headers: Authorization, Content-Type`
+
+Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
+
+**其他行为**
+
+- `GET /favicon.ico` —— 返回 `204 No Content`（避免浏览器请求图标时产生 404 噪音）
 
 ## 客户端接入示例
 
@@ -116,7 +130,19 @@ source: clipper
 把以下代码保存为浏览器书签（替换 `WORKER_URL` 和 `API_KEY`）：
 
 ```javascript
-javascript:(function(){const u=location.href;fetch('WORKER_URL',{method:'POST',headers:{'Authorization':'Bearer API_KEY','Content-Type':'application/json'},body:JSON.stringify({url:u})}).then(r=>r.json()).then(d=>{alert(d.ok?'✓ 已剪藏: '+d.title:'✗ 失败: '+JSON.stringify(d))}).catch(e=>alert('✗ 错误: '+e.message))})();
+javascript: (function () {
+	const u = location.href;
+	fetch('WORKER_URL', {
+		method: 'POST',
+		headers: { Authorization: 'Bearer API_KEY', 'Content-Type': 'application/json' },
+		body: JSON.stringify({ url: u }),
+	})
+		.then((r) => r.json())
+		.then((d) => {
+			alert(d.ok ? '✓ 已剪藏: ' + d.title : '✗ 失败: ' + JSON.stringify(d));
+		})
+		.catch((e) => alert('✗ 错误: ' + e.message));
+})();
 ```
 
 ### curl
