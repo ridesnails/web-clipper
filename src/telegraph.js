@@ -98,9 +98,13 @@ export function markdownToTelegraphNodes(markdown) {
 			}
 
 			// 链接
-			const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
+			const linkMatch = remaining.match(/^\[([^\]]*)\]\(([^)]+)\)/);
 			if (linkMatch) {
-				children.push({ tag: 'a', attrs: { href: linkMatch[2] }, children: [linkMatch[1]] });
+				const linkText = linkMatch[1].trim();
+				// 跳过空文本链接（Jina heading anchor links）
+				if (linkText && !/^\u200B*$/.test(linkText)) {
+					children.push({ tag: 'a', attrs: { href: linkMatch[2] }, children: [linkText] });
+				}
 				remaining = remaining.slice(linkMatch[0].length);
 				continue;
 			}
@@ -121,6 +125,18 @@ export function markdownToTelegraphNodes(markdown) {
 		}
 
 		return children;
+	}
+
+	function parseTableRow(line) {
+		return line
+			.split('|')
+			.map((cell) => cell.trim())
+			.filter((cell, idx, arr) => {
+				// 过滤掉首尾的空单元格（由行首/行尾的 | 产生）
+				if (idx === 0 && cell === '') return false;
+				if (idx === arr.length - 1 && cell === '') return false;
+				return true;
+			});
 	}
 
 	for (let i = 0; i < lines.length; i++) {
@@ -203,6 +219,44 @@ export function markdownToTelegraphNodes(markdown) {
 			inList = true;
 			listItems.push({ tag: 'li', children: parseInline(listMatch[1]) });
 			continue;
+		}
+
+		// 表格检测
+		if (line.includes('|')) {
+			// 向前看：检查当前行和后续行是否构成表格
+			const tableLines = [];
+			let j = i;
+			while (j < lines.length && lines[j].includes('|')) {
+				tableLines.push(lines[j]);
+				j++;
+			}
+
+			// 至少需要两行（表头 + 分隔符）
+			if (tableLines.length >= 2 && /^\s*\|?[\s\-:|]+\|?[\s\-:|]*$/.test(tableLines[1])) {
+				flushList();
+				const headers = parseTableRow(tableLines[0]);
+				const rows = tableLines
+					.slice(2)
+					.map(parseTableRow)
+					.filter((r) => r.length > 0);
+
+				const tableNode = { tag: 'table', children: [] };
+				// 表头行
+				tableNode.children.push({
+					tag: 'tr',
+					children: headers.map((h) => ({ tag: 'th', children: parseInline(h.trim()) })),
+				});
+				// 数据行
+				for (const row of rows) {
+					tableNode.children.push({
+						tag: 'tr',
+						children: row.map((cell) => ({ tag: 'td', children: parseInline(cell.trim()) })),
+					});
+				}
+				nodes.push(tableNode);
+				i = j - 1; // 跳过已处理的行
+				continue;
+			}
 		}
 
 		// 普通段落（处理行内格式）
