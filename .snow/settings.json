@@ -1,0 +1,16 @@
+{
+	"yoloMode": true,
+	"planMode": true,
+	"vulnerabilityHuntingMode": false,
+	"toolSearchEnabled": true,
+	"hybridCompressEnabled": true,
+	"teamMode": true,
+	"mcpServers": {
+		"github": {
+			"command": "npx",
+			"args": ["-y", "@modelcontextprotocol/server-github"],
+			"env": {},
+			"enabled": true
+		}
+	}
+}
