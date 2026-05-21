@@ -1,6 +1,6 @@
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import worker, { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote } from '../src';
+import worker, { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks } from '../src';
 import { getFile } from '../src/telegram.js';
 
 // 预 mock Telegraph/Telegram 模块，供后续集成测试使用
@@ -311,6 +311,23 @@ Body text`);
 	});
 });
 
+describe('stripEmptyLinks', () => {
+	it('removes empty anchor links like [](url)', () => {
+		const md = '## Heading [](https://example.com/anchor)';
+		expect(stripEmptyLinks(md)).toBe('## Heading ');
+	});
+
+	it('removes links with only whitespace or zero-width space', () => {
+		const md = 'Text [\u200B](https://example.com) more';
+		expect(stripEmptyLinks(md)).toBe('Text  more');
+	});
+
+	it('leaves normal links untouched', () => {
+		const md = '[link](https://example.com)';
+		expect(stripEmptyLinks(md)).toBe('[link](https://example.com)');
+	});
+});
+
 // 5. Integration tests with mocked fetch
 describe('Integration with mocked fetch', () => {
 	it('Mock Jina success - mock FNS success - verify 200 response with ok/title/path', async () => {
@@ -373,8 +390,7 @@ describe('Telegraph + Telegram integration', () => {
 		TELEGRAM_CHAT_ID: '-1001234567890',
 	};
 
-	// 以下测试需等 backend-dev teammate 完成 index.js 集成后移除 skip
-	it.skip('POST / with Telegraph config - success returns telegraphUrl and telegramMessageId', async () => {
+	it('POST / with Telegraph config - success returns telegraphUrl and telegramMessageId', async () => {
 		const { createPage } = await import('../src/telegraph.js');
 		const { sendMessage } = await import('../src/telegram.js');
 		createPage.mockResolvedValueOnce({ url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' });
@@ -394,9 +410,15 @@ describe('Telegraph + Telegram integration', () => {
 		expect(json.ok).toBe(true);
 		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
 		expect(json.telegramMessageId).toBe(99);
+
+		expect(sendMessage).toHaveBeenCalledTimes(1);
+		const sentText = sendMessage.mock.calls[0][0];
+		expect(sentText).toContain('#webclipper');
+		expect(sentText).toContain('https://telegra.ph/Test-05-21');
+		expect(sentText).toContain('example.com');
 	});
 
-	it.skip('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
+	it('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
 		const { createPage } = await import('../src/telegraph.js');
 		createPage.mockRejectedValueOnce(new Error('Telegraph API error'));
 
@@ -416,11 +438,11 @@ describe('Telegraph + Telegram integration', () => {
 	});
 });
 
-// 7. Image proxy 路由测试（index.js 集成后开启）
+// 7. Image proxy 路由测试
 describe('Image proxy route', () => {
-	// 以下测试需等 backend-dev teammate 完成 /image-proxy 路由后移除 skip
-	it.skip('GET /image-proxy?file_id=xxx - success returns image with correct headers', async () => {
-		vi.mocked(getFile).mockResolvedValueOnce({
+	it('GET /image-proxy?file_id=xxx - success returns image with correct headers', async () => {
+		const { getFile } = await import('../src/telegram.js');
+		getFile.mockResolvedValueOnce({
 			file_path: 'photos/file_1.jpg',
 			file_url: 'https://api.telegram.org/file/bot123/photos/file_1.jpg',
 		});
@@ -442,7 +464,7 @@ describe('Image proxy route', () => {
 		expect(response.headers.get('Cache-Control')).toContain('max-age=86400');
 	});
 
-	it.skip('GET /image-proxy without file_id - returns 400', async () => {
+	it('GET /image-proxy without file_id - returns 400', async () => {
 		const request = new Request('http://example.com/image-proxy');
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
@@ -452,8 +474,9 @@ describe('Image proxy route', () => {
 		expect(await response.json()).toEqual({ error: 'Missing file_id' });
 	});
 
-	it.skip('GET /image-proxy?file_id=invalid - getFile fails returns 502', async () => {
-		vi.mocked(getFile).mockRejectedValueOnce(new Error('invalid file_id'));
+	it('GET /image-proxy?file_id=invalid - getFile fails returns 502', async () => {
+		const { getFile } = await import('../src/telegram.js');
+		getFile.mockRejectedValueOnce(new Error('invalid file_id'));
 
 		const request = new Request('http://example.com/image-proxy?file_id=invalid');
 		const ctx = createExecutionContext();
