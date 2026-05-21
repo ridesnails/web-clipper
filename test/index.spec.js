@@ -2,6 +2,23 @@ import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloud
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker, { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote } from '../src';
 
+// 预 mock Telegraph/Telegram 模块，供后续集成测试使用
+vi.mock('../src/telegraph.js', async () => {
+	const actual = await vi.importActual('../src/telegraph.js');
+	return {
+		...actual,
+		createPage: vi.fn(),
+	};
+});
+vi.mock('../src/telegram.js', async () => {
+	const actual = await vi.importActual('../src/telegram.js');
+	return {
+		...actual,
+		sendMessage: vi.fn(),
+		getFile: vi.fn(),
+	};
+});
+
 const mockEnv = {
 	API_KEY: 'test-api-key',
 	FNS_BASE: 'https://fns.oba.plus',
@@ -343,5 +360,107 @@ describe('Integration with mocked fetch', () => {
 		const response = await SELF.fetch('http://example.com', { method: 'GET' });
 		expect(response.status).toBe(405);
 		expect(await response.json()).toEqual({ error: 'Method not allowed. Use POST.' });
+	});
+});
+
+// 6. Telegraph + Telegram 集成测试（index.js 集成后开启）
+describe('Telegraph + Telegram integration', () => {
+	const telegraphEnv = {
+		...mockEnv,
+		TELEGRAPH_ACCESS_TOKEN: 'test-telegraph-token',
+		TELEGRAM_BOT_TOKEN: '123456:ABCdef',
+		TELEGRAM_CHAT_ID: '-1001234567890',
+	};
+
+	// 以下测试需等 backend-dev teammate 完成 index.js 集成后移除 skip
+	it.skip('POST / with Telegraph config - success returns telegraphUrl and telegramMessageId', async () => {
+		const { createPage } = await import('../src/telegraph.js');
+		const { sendMessage } = await import('../src/telegram.js');
+		createPage.mockResolvedValueOnce({ url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' });
+		sendMessage.mockResolvedValueOnce({ message_id: 99 });
+
+		fetchMock
+			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+
+		const request = createRequest({ url: 'https://example.com/article' });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, telegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.ok).toBe(true);
+		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
+		expect(json.telegramMessageId).toBe(99);
+	});
+
+	it.skip('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
+		const { createPage } = await import('../src/telegraph.js');
+		createPage.mockRejectedValueOnce(new Error('Telegraph API error'));
+
+		fetchMock
+			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+
+		const request = createRequest({ url: 'https://example.com/article' });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, telegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.ok).toBe(true);
+		expect(json.telegraphUrl).toBeUndefined();
+	});
+});
+
+// 7. Image proxy 路由测试（index.js 集成后开启）
+describe('Image proxy route', () => {
+	// 以下测试需等 backend-dev teammate 完成 /image-proxy 路由后移除 skip
+	it.skip('GET /image-proxy?file_id=xxx - success returns image with correct headers', async () => {
+		const { getFile } = await import('../src/telegram.js');
+		getFile.mockResolvedValueOnce({
+			file_path: 'photos/file_1.jpg',
+			file_url: 'https://api.telegram.org/file/bot123/photos/file_1.jpg',
+		});
+
+		fetchMock.mockResolvedValueOnce(
+			new Response(new Uint8Array([1, 2, 3]), {
+				status: 200,
+				headers: { 'Content-Type': 'image/jpeg' },
+			})
+		);
+
+		const request = new Request('http://example.com/image-proxy?file_id=abc123');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('Content-Type')).toBe('image/jpeg');
+		expect(response.headers.get('Cache-Control')).toContain('max-age=86400');
+	});
+
+	it.skip('GET /image-proxy without file_id - returns 400', async () => {
+		const request = new Request('http://example.com/image-proxy');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({ error: 'Missing file_id' });
+	});
+
+	it.skip('GET /image-proxy?file_id=invalid - getFile fails returns 502', async () => {
+		const { getFile } = await import('../src/telegram.js');
+		getFile.mockRejectedValueOnce(new Error('invalid file_id'));
+
+		const request = new Request('http://example.com/image-proxy?file_id=invalid');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(502);
 	});
 });

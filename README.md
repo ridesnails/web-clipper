@@ -84,9 +84,13 @@ source: clipper
 {
 	"ok": true,
 	"title": "Article Title",
-	"path": "Clippings/2026-05/Article-Title.md"
+	"path": "Clippings/2026-05/Article-Title.md",
+	"telegraphUrl": "https://telegra.ph/Article-Title-05-21",
+	"telegramMessageId": 123
 }
 ```
+
+- `telegraphUrl` 和 `telegramMessageId` 仅在配置了 Telegraph + Telegram 环境变量且推送成功时返回。若未配置或推送失败，这两个字段不存在。
 
 **Response（失败）**
 
@@ -109,6 +113,23 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 **其他行为**
 
 - `GET /favicon.ico` —— 返回 `204 No Content`（避免浏览器请求图标时产生 404 噪音）
+
+### Telegraph 与 Telegram 推送
+
+当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、`TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 时，FNS 写入成功后 Worker 会自动：
+
+1. 将 Markdown 正文转换为 Telegraph Node 格式
+2. 调用 Telegraph `createPage` 创建可阅读的在线页面
+3. 通过 Telegram Bot 发送消息到指定频道/群组，消息包含：
+   - 页面标题
+   - Telegraph 链接
+   - 原文链接
+
+**图片处理**：Telegraph 原生图片上传已废弃。Worker 会将文章中的图片上传到 Telegram 频道获取 `file_id`，再通过 `/image-proxy?file_id=xxx` 路由代理访问。Telegram 频道相当于免费图床。
+
+**失败不影响主流程**：如果 Telegraph 创建页面或 Telegram 发送消息失败，Worker 仍然会返回 FNS 写入成功的结果（`ok: true`），只是响应中不包含 `telegraphUrl` 和 `telegramMessageId`。FNS 写入始终优先，Telegraph/Telegram 推送是附加的"锦上添花"。
+
+**环境变量**：这三个变量缺一不可。缺少任何一个都不会触发 Telegraph/Telegram 推送。配置方法参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
 ## 客户端接入示例
 

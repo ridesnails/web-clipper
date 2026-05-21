@@ -64,13 +64,13 @@ clip-7x9k2m-bird-2026-q3p8r5t1
 
 **到这里你应该有 5 个值**：
 
-| 名字 | 来源 | 示例 |
-|---|---|---|
-| `FNS_BASE` | 你的 FNS 地址 | `https://fns.example.com` |
-| `FNS_VAULT` | FNS 里的 Vault 名 | `Clip` |
-| `FNS_TOKEN` | FNS 登录接口返回的 token | `eyJhbGc...` |
-| `JINA_API_KEY` | Jina 账号 | `jina_xxx...` |
-| `API_KEY` | 自己编的 | `clip-xxx-xxx` |
+| 名字           | 来源                     | 示例                      |
+| -------------- | ------------------------ | ------------------------- |
+| `FNS_BASE`     | 你的 FNS 地址            | `https://fns.example.com` |
+| `FNS_VAULT`    | FNS 里的 Vault 名        | `Clip`                    |
+| `FNS_TOKEN`    | FNS 登录接口返回的 token | `eyJhbGc...`              |
+| `JINA_API_KEY` | Jina 账号                | `jina_xxx...`             |
+| `API_KEY`      | 自己编的                 | `clip-xxx-xxx`            |
 
 ## 2. 初始化项目
 
@@ -124,6 +124,9 @@ npx wrangler dev
 FNS_TOKEN=<你的FNS Token>
 API_KEY=<你自己编的API_KEY>
 JINA_API_KEY=<你的Jina API Key>
+TELEGRAPH_ACCESS_TOKEN=<你的Telegraph access_token>
+TELEGRAM_BOT_TOKEN=<你的Bot Token>
+TELEGRAM_CHAT_ID=<你的频道ID，如 -1001234567890>
 ```
 
 ### 3.2 把 `.dev.vars` 加入 `.gitignore`
@@ -140,18 +143,18 @@ echo ".dev.vars" >> .gitignore
 
 ```jsonc
 {
-  "$schema": "node_modules/wrangler/schema.json",
-  "name": "web-clipper",
-  "main": "src/index.js",
-  "compatibility_date": "2025-XX-XX",
-  "observability": {
-    "enabled": true
-  },
-  "vars": {
-    "FNS_BASE": "https://<你的FNS地址>",
-    "FNS_VAULT": "<你的Vault名>",
-    "CLIP_FOLDER": "Clippings"
-  }
+	"$schema": "node_modules/wrangler/schema.json",
+	"name": "web-clipper",
+	"main": "src/index.js",
+	"compatibility_date": "2025-XX-XX",
+	"observability": {
+		"enabled": true
+	},
+	"vars": {
+		"FNS_BASE": "https://<你的FNS地址>",
+		"FNS_VAULT": "<你的Vault名>",
+		"CLIP_FOLDER": "Clippings"
+	}
 }
 ```
 
@@ -177,6 +180,64 @@ npx wrangler secret put JINA_API_KEY
 如果第一次 `wrangler secret put` 时提示 worker 不存在询问是否创建，选 **Yes**。
 
 每次成功会显示 `✨ Success! Uploaded secret`。
+
+### Telegraph 与 Telegram 配置（可选）
+
+如需启用 Telegraph 页面生成和 Telegram Bot 推送，需要配置以下 secrets：
+
+#### 1. TELEGRAPH_ACCESS_TOKEN
+
+Telegraph 账号的 access token。
+
+获取方式：
+
+```bash
+curl "https://api.telegra.ph/createAccount?short_name=YourApp&author_name=YourName"
+```
+
+在响应中获取 `result.access_token`。
+
+设置命令：
+
+```bash
+npx wrangler secret put TELEGRAPH_ACCESS_TOKEN
+```
+
+#### 2. TELEGRAM_BOT_TOKEN
+
+Telegram Bot 的 API Token。
+
+获取方式：
+
+1. 在 Telegram 搜索 @BotFather
+2. 发送 `/newbot`
+3. 按提示命名 Bot
+4. 复制返回的 Token（格式：`123456789:ABCdef...`）
+
+设置命令：
+
+```bash
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+```
+
+#### 3. TELEGRAM_CHAT_ID
+
+Telegram 频道或群组的 ID。
+
+获取方式：
+
+1. 把 Bot 加入目标频道/群组，设为管理员
+2. 在频道/群组发送一条消息
+3. 访问 `https://api.telegram.org/bot<TOKEN>/getUpdates`
+4. 找到 `channel_post.chat.id`（频道通常以 `-100` 开头）
+
+设置命令：
+
+```bash
+npx wrangler secret put TELEGRAM_CHAT_ID
+```
+
+> 注意：这三个变量缺一不可。缺少任何一个都不会触发 Telegraph/Telegram 推送，但 FNS 写入不受影响。
 
 ## 4. 写入主代码
 
@@ -204,7 +265,7 @@ curl -X POST http://localhost:8787 \
 预期返回：
 
 ```json
-{"ok":true,"title":"Example Domain","path":"Clippings/2026-05/Example-Domain.md"}
+{ "ok": true, "title": "Example Domain", "path": "Clippings/2026-05/Example-Domain.md" }
 ```
 
 打开 Obsidian → 你的 Vault → `Clippings/2026-05/` 应该出现 `Example-Domain.md`，内容带完整 frontmatter。
@@ -298,6 +359,7 @@ Jina 限速触发。如果你已经按 [1.3](#13-jina-api-key) 配了 `JINA_API_
 ### Q: Worker 部署后但 Obsidian 里看不到笔记
 
 依次检查：
+
 1. `npx wrangler tail` 看 Worker 日志，确认是否 `Clipped: ...` 成功打印
 2. FNS Web 管理面板里点开对应 Vault，看笔记是否在 FNS 服务端
 3. 如果 FNS 服务端有笔记但本地 Obsidian 没有，重启 Obsidian 让插件重新同步
@@ -307,7 +369,7 @@ Jina 限速触发。如果你已经按 [1.3](#13-jina-api-key) 配了 `JINA_API_
 修改 `src/index.js` 里这一段：
 
 ```javascript
-const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
 const path = `${env.CLIP_FOLDER}/${yyyymm}/${slug}.md`;
 ```
 
