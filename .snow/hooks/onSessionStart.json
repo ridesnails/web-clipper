@@ -1,0 +1,14 @@
+{
+  "onSessionStart": [
+    {
+      "description": "Load project context",
+      "hooks": [
+        {
+          "type": "prompt",
+          "prompt": "本项目是 Cloudflare Workers 网页剪藏服务 (web-clipper)。主要脚本：npm run dev / npm run deploy / npm test。代码风格：Prettier (tabs, singleQuote, semi, printWidth 140)。",
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}

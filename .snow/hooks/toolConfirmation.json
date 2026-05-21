@@ -1,0 +1,15 @@
+{
+  "toolConfirmation": [
+    {
+      "matcher": "terminal-execute",
+      "description": "Confirm dangerous terminal commands",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "echo 'Executing potentially dangerous command. Please confirm in the UI.'",
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}
