@@ -118,7 +118,7 @@ export default {
 		const path = `${env.CLIP_FOLDER}/${yyyymm}/${slug}.md`;
 
 		// 剥掉 jina 的元信息头，拼带 frontmatter 的最终内容
-		const cleanBody = cleanJinaBody(markdown);
+		const cleanBody = stripEmptyLinks(cleanJinaBody(markdown));
 		const content = buildNote({ title, url, date: now.toISOString(), body: cleanBody });
 
 		// —— 第五关：写入 FNS ——
@@ -180,9 +180,13 @@ export default {
 					telegraphUrl = pageResult.url;
 
 					// 6. 发送 Telegram 消息
-					const msgText = `<b>${escapeHtml(
-						title
-					)}</b>\n\n📄 <a href="${telegraphUrl}">Telegraph 页面</a>\n🔗 <a href="${url}">原文链接</a>`;
+					let msgText;
+					try {
+						const hostname = escapeHtml(new URL(url).hostname);
+						msgText = `<b>${escapeHtml(title)}</b>\n\n<a href="${url}">${hostname}</a>\n\n${telegraphUrl}\n\n#webclipper`;
+					} catch {
+						msgText = `<b>${escapeHtml(title)}</b>\n\n${url}\n\n${telegraphUrl}\n\n#webclipper`;
+					}
 					const msgResult = await sendMessage(msgText, env.TELEGRAM_CHAT_ID, env);
 					telegramMessageId = msgResult.message_id;
 
@@ -297,4 +301,10 @@ function escapeHtml(str) {
 	return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-export { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote };
+// 过滤掉 Markdown 中空文本的链接（Jina 提取的 heading anchor links）
+function stripEmptyLinks(md) {
+	// 匹配 [](url) 或 [ ](url) 或 [\u200B](url)（零宽空格）
+	return md.replace(/\[(?:\s|\u200B)*\]\(https?:\/\/[^)]+\)/g, '');
+}
+
+export { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks, extractImageUrls, escapeHtml };
