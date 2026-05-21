@@ -23,13 +23,13 @@ export default {
 
 		// HEAD、GET、PUT、DELETE 等不允许的方法统一返回 405
 		if (request.method !== 'POST') {
-			return new Response('Method not allowed. Use POST.', { status: 405, headers: corsHeaders(env) });
+			return Response.json({ error: 'Method not allowed. Use POST.' }, { status: 405, headers: corsHeaders(env) });
 		}
 
 		// —— 第一关：密码校验 ——
 		const auth = request.headers.get('Authorization');
 		if (auth !== `Bearer ${env.API_KEY}`) {
-			return new Response('Unauthorized', { status: 401, headers: corsHeaders(env) });
+			return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(env) });
 		}
 
 		// —— 第二关：解析 body ——
@@ -37,14 +37,14 @@ export default {
 		try {
 			reqBody = await request.json();
 		} catch {
-			return new Response('Invalid JSON body', { status: 400, headers: corsHeaders(env) });
+			return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
 		}
 		const url = reqBody.url;
 		if (!url || typeof url !== 'string') {
-			return new Response("Missing 'url' field", { status: 400, headers: corsHeaders(env) });
+			return Response.json({ error: "Missing 'url' field" }, { status: 400, headers: corsHeaders(env) });
 		}
 		if (!isValidUrl(url)) {
-			return new Response('Invalid url (must be http or https)', { status: 400, headers: corsHeaders(env) });
+			return Response.json({ error: 'Invalid url (must be http or https)' }, { status: 400, headers: corsHeaders(env) });
 		}
 
 		// —— 第三关：用 jina 把网页转成 Markdown ——
@@ -55,19 +55,33 @@ export default {
 			if (env.JINA_API_KEY) {
 				jinaHeaders.Authorization = `Bearer ${env.JINA_API_KEY}`;
 			}
-			const jinaRes = await fetch(`https://r.jina.ai/${url}`, {
-				headers: jinaHeaders,
-				signal: AbortSignal.timeout(25000), // 25 秒超时
-			});
-			if (!jinaRes.ok) {
+
+			let jinaRes;
+			let lastErr;
+			for (let attempt = 0; attempt <= 2; attempt++) {
+				if (attempt > 0) {
+					const delay = attempt === 1 ? 1000 : 2000;
+					await new Promise((r) => setTimeout(r, delay));
+				}
+				jinaRes = await fetch(`https://r.jina.ai/${url}`, {
+					headers: jinaHeaders,
+					signal: AbortSignal.timeout(25000), // 25 秒超时
+				});
+				if (jinaRes.ok) {
+					break;
+				}
 				const errText = await jinaRes.text();
+				lastErr = `${jinaRes.status} ${errText}`;
 				console.error('Jina returned non-200:', url, jinaRes.status, errText);
-				return new Response(`Jina fetch failed: ${jinaRes.status} ${errText}`, { status: 502, headers: corsHeaders(env) });
+				const shouldRetry = jinaRes.status === 429 || jinaRes.status >= 500;
+				if (!shouldRetry || attempt === 2) {
+					return Response.json({ error: `Jina fetch failed: ${lastErr}` }, { status: 502, headers: corsHeaders(env) });
+				}
 			}
 			markdown = await jinaRes.text();
 		} catch (e) {
 			console.error('Jina fetch failed:', url, e.message);
-			return new Response(`Jina error: ${e.message}`, { status: 502, headers: corsHeaders(env) });
+			return Response.json({ error: `Jina error: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
 		}
 
 		// —— 第四关：抽标题、清理正文、生成文件路径 ——
@@ -98,7 +112,7 @@ export default {
 			const fnsData = await fnsRes.json();
 			if (!fnsData.status) {
 				console.error('FNS write failed:', path, JSON.stringify(fnsData));
-				return new Response(`FNS write failed: ${JSON.stringify(fnsData)}`, { status: 502, headers: corsHeaders(env) });
+				return Response.json({ error: `FNS write failed: ${JSON.stringify(fnsData)}` }, { status: 502, headers: corsHeaders(env) });
 			}
 			console.log('Clipped:', title, '->', path);
 			return Response.json(
@@ -111,7 +125,7 @@ export default {
 			);
 		} catch (e) {
 			console.error('FNS write failed:', path, e.message);
-			return new Response(`FNS error: ${e.message}`, { status: 502, headers: corsHeaders(env) });
+			return Response.json({ error: `FNS error: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
 		}
 	},
 };

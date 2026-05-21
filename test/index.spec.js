@@ -51,7 +51,7 @@ describe('Auth', () => {
 		const response = await worker.fetch(request, mockEnv, ctx);
 		await waitOnExecutionContext(ctx);
 		expect(response.status).toBe(401);
-		expect(await response.text()).toBe('Unauthorized');
+		expect(await response.json()).toEqual({ error: 'Unauthorized' });
 	});
 
 	it('Wrong Bearer token - 401', async () => {
@@ -313,7 +313,10 @@ describe('Integration with mocked fetch', () => {
 	});
 
 	it('Mock Jina failure (non-200) - verify 502', async () => {
-		fetchMock.mockResolvedValueOnce(new Response('Jina error', { status: 500 }));
+		fetchMock
+			.mockResolvedValueOnce(new Response('Jina error', { status: 500 }))
+			.mockResolvedValueOnce(new Response('Jina error', { status: 500 }))
+			.mockResolvedValueOnce(new Response('Jina error', { status: 500 }));
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -339,6 +342,6 @@ describe('Integration with mocked fetch', () => {
 	it('integration style with SELF.fetch', async () => {
 		const response = await SELF.fetch('http://example.com', { method: 'GET' });
 		expect(response.status).toBe(405);
-		expect(await response.text()).toBe('Method not allowed. Use POST.');
+		expect(await response.json()).toEqual({ error: 'Method not allowed. Use POST.' });
 	});
 });
