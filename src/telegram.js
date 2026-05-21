@@ -77,9 +77,7 @@ export async function sendMessage(text, chatId, env) {
  * @returns {Promise<{file_path: string, file_url: string}>}
  */
 export async function getFile(fileId, env) {
-	const res = await fetch(
-		`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`
-	);
+	const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`);
 
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({}));

@@ -1,6 +1,7 @@
 import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker, { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote } from '../src';
+import { getFile } from '../src/telegram.js';
 
 // 预 mock Telegraph/Telegram 模块，供后续集成测试使用
 vi.mock('../src/telegraph.js', async () => {
@@ -419,8 +420,7 @@ describe('Telegraph + Telegram integration', () => {
 describe('Image proxy route', () => {
 	// 以下测试需等 backend-dev teammate 完成 /image-proxy 路由后移除 skip
 	it.skip('GET /image-proxy?file_id=xxx - success returns image with correct headers', async () => {
-		const { getFile } = await import('../src/telegram.js');
-		getFile.mockResolvedValueOnce({
+		vi.mocked(getFile).mockResolvedValueOnce({
 			file_path: 'photos/file_1.jpg',
 			file_url: 'https://api.telegram.org/file/bot123/photos/file_1.jpg',
 		});
@@ -429,7 +429,7 @@ describe('Image proxy route', () => {
 			new Response(new Uint8Array([1, 2, 3]), {
 				status: 200,
 				headers: { 'Content-Type': 'image/jpeg' },
-			})
+			}),
 		);
 
 		const request = new Request('http://example.com/image-proxy?file_id=abc123');
@@ -453,8 +453,7 @@ describe('Image proxy route', () => {
 	});
 
 	it.skip('GET /image-proxy?file_id=invalid - getFile fails returns 502', async () => {
-		const { getFile } = await import('../src/telegram.js');
-		getFile.mockRejectedValueOnce(new Error('invalid file_id'));
+		vi.mocked(getFile).mockRejectedValueOnce(new Error('invalid file_id'));
 
 		const request = new Request('http://example.com/image-proxy?file_id=invalid');
 		const ctx = createExecutionContext();

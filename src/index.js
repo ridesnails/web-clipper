@@ -33,7 +33,7 @@ export default {
 				}
 				return new Response(fileRes.body, {
 					headers: {
-						'Content-Type': fileRes.headers.get('Content-Type') || 'image/jpeg',
+						'Content-Type': mimeTypeFromPath(fileInfo.file_path) || fileRes.headers.get('Content-Type') || 'image/jpeg',
 						'Cache-Control': 'public, max-age=86400',
 					},
 				});
@@ -181,7 +181,7 @@ export default {
 
 					// 6. 发送 Telegram 消息
 					const msgText = `<b>${escapeHtml(
-						title
+						title,
 					)}</b>\n\n📄 <a href="${telegraphUrl}">Telegraph 页面</a>\n🔗 <a href="${url}">原文链接</a>`;
 					const msgResult = await sendMessage(msgText, env.TELEGRAM_CHAT_ID, env);
 					telegramMessageId = msgResult.message_id;
@@ -202,7 +202,7 @@ export default {
 					telegraphUrl: telegraphUrl || undefined,
 					telegramMessageId: telegramMessageId || undefined,
 				},
-				{ headers: corsHeaders(env) }
+				{ headers: corsHeaders(env) },
 			);
 		} catch (e) {
 			console.error('FNS write failed:', path, e.message);
@@ -298,3 +298,20 @@ function escapeHtml(str) {
 }
 
 export { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote };
+
+// 根据文件路径扩展名推断 MIME 类型（Telegram CDN 常返回 application/octet-stream）
+function mimeTypeFromPath(filePath) {
+	if (!filePath) return null;
+	const ext = filePath.split('.').pop().toLowerCase();
+	const map = {
+		jpg: 'image/jpeg',
+		jpeg: 'image/jpeg',
+		png: 'image/png',
+		gif: 'image/gif',
+		webp: 'image/webp',
+		bmp: 'image/bmp',
+		svg: 'image/svg+xml',
+		ico: 'image/x-icon',
+	};
+	return map[ext] || null;
+}

@@ -133,11 +133,7 @@ describe('markdownToTelegraphNodes', () => {
 		const result = markdownToTelegraphNodes('Visit [my site](https://example.com) now');
 		expect(result).toHaveLength(1);
 		expect(result[0].tag).toBe('p');
-		expect(result[0].children).toEqual([
-			'Visit ',
-			{ tag: 'a', attrs: { href: 'https://example.com' }, children: ['my site'] },
-			' now',
-		]);
+		expect(result[0].children).toEqual(['Visit ', { tag: 'a', attrs: { href: 'https://example.com' }, children: ['my site'] }, ' now']);
 	});
 
 	it('多段落输入 → 返回多个节点', () => {

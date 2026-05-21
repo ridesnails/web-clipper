@@ -44,7 +44,7 @@ describe('sendPhoto', () => {
 		// 验证请求 URL
 		expect(globalThis.fetch).toHaveBeenCalledWith(
 			`https://api.telegram.org/bot${mockEnv.TELEGRAM_BOT_TOKEN}/sendPhoto`,
-			expect.objectContaining({ method: 'POST' })
+			expect.objectContaining({ method: 'POST' }),
 		);
 	});
 
