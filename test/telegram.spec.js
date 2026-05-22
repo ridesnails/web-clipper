@@ -6,6 +6,13 @@ const mockEnv = {
 	TELEGRAM_CHAT_ID: '-1001234567890',
 };
 
+const splitBotEnv = {
+	IMG_BOT: '111111:IMGbotToken',
+	TELEGRAM_CHAT_ID: '-1001234567890',
+	CLIP_BOT: '222222:CLIPbotToken',
+	USER_ID: '987654321',
+};
+
 let originalFetch;
 
 beforeEach(() => {
@@ -48,6 +55,24 @@ describe('sendPhoto', () => {
 		);
 	});
 
+	it('使用 IMG_BOT 发送图片，验证图片链路不使用 CLIP_BOT', async () => {
+		const mockResponse = {
+			ok: true,
+			result: {
+				message_id: 43,
+				photo: [{ file_id: 'img_large', file_unique_id: 'uimg', width: 800 }],
+			},
+		};
+		globalThis.fetch.mockResolvedValueOnce(new Response(JSON.stringify(mockResponse), { status: 200 }));
+
+		await sendPhoto(new Uint8Array([1, 2, 3]), 'test.png', splitBotEnv);
+
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			`https://api.telegram.org/bot${splitBotEnv.IMG_BOT}/sendPhoto`,
+			expect.objectContaining({ method: 'POST' }),
+		);
+	});
+
 	it('模拟 Telegram 返回 400，验证抛出错误', async () => {
 		const mockResponse = {
 			ok: false,
@@ -79,6 +104,41 @@ describe('sendMessage', () => {
 		expect(body.parse_mode).toBe('HTML');
 		expect(body.chat_id).toBe(mockEnv.TELEGRAM_CHAT_ID);
 		expect(body.text).toBe('<b>Hello</b> World');
+		expect(body.link_preview_options).toBeUndefined();
+	});
+
+	it('使用 CLIP_BOT 和 USER_ID 推送剪藏消息', async () => {
+		const mockResponse = {
+			ok: true,
+			result: { message_id: 101 },
+		};
+		globalThis.fetch.mockResolvedValueOnce(new Response(JSON.stringify(mockResponse), { status: 200 }));
+
+		await sendMessage('<b>Clip</b>', undefined, splitBotEnv);
+
+		const callArgs = globalThis.fetch.mock.calls[0];
+		expect(callArgs[0]).toBe(`https://api.telegram.org/bot${splitBotEnv.CLIP_BOT}/sendMessage`);
+		const body = JSON.parse(callArgs[1].body);
+		expect(body.chat_id).toBe(splitBotEnv.USER_ID);
+		expect(body.text).toBe('<b>Clip</b>');
+	});
+
+	it('可传入 link_preview_options 强制 Telegraph 预览', async () => {
+		const mockResponse = {
+			ok: true,
+			result: { message_id: 100 },
+		};
+		globalThis.fetch.mockResolvedValueOnce(new Response(JSON.stringify(mockResponse), { status: 200 }));
+
+		await sendMessage('test', mockEnv.TELEGRAM_CHAT_ID, mockEnv, { linkPreviewUrl: 'https://telegra.ph/Test-05-21' });
+
+		const callArgs = globalThis.fetch.mock.calls[0];
+		const body = JSON.parse(callArgs[1].body);
+		expect(body.link_preview_options).toEqual({
+			is_disabled: false,
+			url: 'https://telegra.ph/Test-05-21',
+			prefer_large_media: true,
+		});
 	});
 
 	it('模拟网络错误，验证抛出错误', async () => {
@@ -105,6 +165,19 @@ describe('getFile', () => {
 
 		expect(result.file_path).toBe('photos/file_1.jpg');
 		expect(result.file_url).toBe(`https://api.telegram.org/file/bot${mockEnv.TELEGRAM_BOT_TOKEN}/photos/file_1.jpg`);
+	});
+
+	it('使用 IMG_BOT 获取文件信息，验证图片代理链路不使用 CLIP_BOT', async () => {
+		const mockResponse = {
+			ok: true,
+			result: { file_path: 'photos/file_2.jpg' },
+		};
+		globalThis.fetch.mockResolvedValueOnce(new Response(JSON.stringify(mockResponse), { status: 200 }));
+
+		const result = await getFile('abc456', splitBotEnv);
+
+		expect(globalThis.fetch).toHaveBeenCalledWith(`https://api.telegram.org/bot${splitBotEnv.IMG_BOT}/getFile?file_id=abc456`);
+		expect(result.file_url).toBe(`https://api.telegram.org/file/bot${splitBotEnv.IMG_BOT}/photos/file_2.jpg`);
 	});
 
 	it('模拟 file_id 无效，验证抛出错误', async () => {

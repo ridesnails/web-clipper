@@ -301,7 +301,7 @@ function transformToIframeUrl(url) {
 }
 
 function isSafeUrl(url) {
-	return /^https?:\/\//i.test(url) || url.startsWith('/embed/');
+	return typeof url === 'string' && (/^https?:\/\//i.test(url) || url.startsWith('/embed/'));
 }
 
 function appendChild(parent, child) {

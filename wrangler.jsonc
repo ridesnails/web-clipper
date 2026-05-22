@@ -10,12 +10,6 @@
 	"observability": {
 		"enabled": true
 	},
-
-  "vars": {
-    "FNS_BASE": "https://fns.oba.plus",
-    "FNS_VAULT": "Clip",
-    "CLIP_FOLDER": "Clippings"
-  },
 	"upload_source_maps": true,
 	"compatibility_flags": [
 		"nodejs_compat"

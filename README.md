@@ -116,20 +116,22 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 ### Telegraph 与 Telegram 推送
 
-当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、`TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 时，FNS 写入成功后 Worker 会自动：
+当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、剪藏通知 Bot（`CLIP_BOT` + `USER_ID`，兼容旧 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`）时，FNS 写入成功后 Worker 会自动：
 
 1. 将 Markdown 正文转换为 Telegraph Node 格式
 2. 调用 Telegraph `createPage` 创建可阅读的在线页面
-3. 通过 Telegram Bot 发送消息到指定频道/群组，消息包含：
+3. 通过剪藏通知 Bot 发送消息到指定用户/频道/群组，消息包含：
+   - Telegraph 链接（放在首行，并通过 `link_preview_options.url` 强制即时预览）
    - 页面标题
-   - Telegraph 链接
+   - AI 摘要（如果已配置 AI）
    - 原文链接
+   - AI 标签（如果已生成）
 
-**图片处理**：Telegraph 原生图片上传已废弃。Worker 会将文章中的图片上传到 Telegram 频道获取 `file_id`，再通过 `/image-proxy?file_id=xxx` 路由代理访问。Telegram 频道相当于免费图床。
+**图片处理**：Telegraph 原生图片上传已废弃。Worker 会将文章中的图片通过图片 Bot（优先 `IMG_BOT`，兼容旧 `TELEGRAM_BOT_TOKEN`；聊天目标优先 `IMG_CHAT_ID`，兼容旧 `TELEGRAM_CHAT_ID`）上传到 Telegram 频道获取 `file_id`，再通过 `/image-proxy?file_id=xxx` 路由代理访问。Telegram 频道相当于免费图床。
 
 **失败不影响主流程**：如果 Telegraph 创建页面或 Telegram 发送消息失败，Worker 仍然会返回 FNS 写入成功的结果（`ok: true`），只是响应中不包含 `telegraphUrl` 和 `telegramMessageId`。FNS 写入始终优先，Telegraph/Telegram 推送是附加的"锦上添花"。
 
-**环境变量**：这三个变量缺一不可。缺少任何一个都不会触发 Telegraph/Telegram 推送。配置方法参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+**环境变量**：推荐使用 `IMG_BOT` 负责图片、`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。配置方法参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
 ## 客户端接入示例
 
@@ -185,7 +187,7 @@ curl -X POST https://web-clipper.<your>.workers.dev \
 
 - **没有队列、没有数据库、没有状态机** —— 个人单用户场景下 QPS ≈ 0，引入这些只增加复杂度，FNS 自己已经有完整的存储和同步层
 - **抓取在客户端 + Jina Reader 兜底** —— 不在服务端跑 Chromium / SingleFile，避开了 Worker 不能跑 CLI 的限制
-- **LLM 增强不在 pipeline 里** —— FNS 原生支持 MCP，AI 增强（摘要、自动打标）应该在客户端通过 MCP 异步进行，而不是阻塞剪藏主链路
+- **AI 增强可选、失败不阻塞** —— 摘要和自动打标只在配置了 AI 变量时启用；失败时剪藏、FNS 写入、Telegraph/Telegram 主链路继续降级运行
 - **HTML 高保真存档不做** —— 个人剪藏场景下"高保真存档"通常是仓鼠症，回看率极低；如果将来真需要，可由 FNS 的附件同步 + Git 自动提交免费提供
 
 ## 致谢

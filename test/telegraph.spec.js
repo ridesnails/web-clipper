@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createPage, markdownToTelegraphNodes } from '../src/telegraph.js';
+import { createPage, htmlToTelegraphNodes, markdownToTelegraphNodes } from '../src/telegraph.js';
 
 const mockEnv = {
 	TELEGRAPH_ACCESS_TOKEN: 'test-access-token-12345',
@@ -95,6 +95,11 @@ describe('markdownToTelegraphNodes', () => {
 	it('图片 ![alt](http://img.jpg) → img', () => {
 		const result = markdownToTelegraphNodes('![alt](http://img.jpg)');
 		expect(result).toEqual([{ tag: 'img', attrs: { src: 'http://img.jpg' } }]);
+	});
+
+	it('缺失 href/src 的 HTML 标签不会触发 startsWith 异常', () => {
+		const result = htmlToTelegraphNodes('<p>before <a>link</a> <img> after</p>');
+		expect(result).toEqual([{ tag: 'p', children: ['before ', { tag: 'a', children: ['link'] }, { tag: 'img' }, ' after'] }]);
 	});
 
 	it('列表项 - item → li', () => {

@@ -16,6 +16,7 @@ vi.mock('../src/telegram.js', async () => {
 	return {
 		...actual,
 		sendMessage: vi.fn(),
+		sendPhoto: vi.fn(),
 		getFile: vi.fn(),
 	};
 });
@@ -27,6 +28,8 @@ const mockEnv = {
 	FNS_VAULT: 'Clip',
 	CLIP_FOLDER: 'Clippings',
 };
+
+const telegraphPublicBaseUrl = 'https://clip.example.com';
 
 function createRequest(body, method = 'POST', auth = `Bearer ${mockEnv.API_KEY}`) {
 	const headers = { 'Content-Type': 'application/json' };
@@ -297,6 +300,15 @@ date: 2024-01-01T00:00:00.000Z
 source: clipper
 ---
 
+# My Title
+
+> [!info] 📌 信息
+> - **来源**：[example.com](https://example.com)
+> - **时间**：2024-01-01T00:00:00.000Z
+> - **链接**：[原文链接](https://example.com)
+
+## 📄 正文
+
 Body text`);
 	});
 
@@ -386,8 +398,11 @@ describe('Telegraph + Telegram integration', () => {
 	const telegraphEnv = {
 		...mockEnv,
 		TELEGRAPH_ACCESS_TOKEN: 'test-telegraph-token',
-		TELEGRAM_BOT_TOKEN: '123456:ABCdef',
+		IMG_BOT: '111111:IMGbotToken',
 		TELEGRAM_CHAT_ID: '-1001234567890',
+		CLIP_BOT: '222222:CLIPbotToken',
+		USER_ID: '987654321',
+		PUBLIC_BASE_URL: telegraphPublicBaseUrl,
 	};
 
 	it('POST / with Telegraph config - success returns telegraphUrl and telegramMessageId', async () => {
@@ -398,11 +413,26 @@ describe('Telegraph + Telegram integration', () => {
 
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						choices: [
+							{
+								message: {
+									content: JSON.stringify({ summary: '一段摘要', tags: ['云服务', 'Docker Deploy'] }),
+								},
+							},
+						],
+					}),
+					{ status: 200 },
+				),
+			)
 			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
 
 		const request = createRequest({ url: 'https://example.com/article' });
+		const telegraphAiEnv = { ...telegraphEnv, AI_API_KEY: 'test-ai-key' };
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, telegraphEnv, ctx);
+		const response = await worker.fetch(request, telegraphAiEnv, ctx);
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
@@ -412,10 +442,64 @@ describe('Telegraph + Telegram integration', () => {
 		expect(json.telegramMessageId).toBe(99);
 
 		expect(sendMessage).toHaveBeenCalledTimes(1);
+		expect(sendMessage.mock.calls[0][1]).toBe(telegraphAiEnv.USER_ID);
+		expect(sendMessage.mock.calls[0][2].CLIP_BOT).toBe(telegraphAiEnv.CLIP_BOT);
 		const sentText = sendMessage.mock.calls[0][0];
-		expect(sentText).toContain('#webclipper');
-		expect(sentText).toContain('https://telegra.ph/Test-05-21');
+		expect(sentText.startsWith('https://telegra.ph/Test-05-21\n\n')).toBe(true);
+		expect(sentText).toContain('一段摘要');
+		expect(sentText).toContain('#云服务 #Docker_Deploy');
 		expect(sentText).toContain('example.com');
+		expect(sendMessage.mock.calls[0][3]).toEqual({ linkPreviewUrl: 'https://telegra.ph/Test-05-21' });
+
+		const fnsPayload = JSON.parse(fetchMock.mock.calls[2][1].body);
+		expect(fnsPayload.content).toContain('> [!abstract] ✨ 摘要');
+		expect(fnsPayload.content).toContain('> - **标签**：#云服务 #Docker_Deploy');
+		expect(fnsPayload.content).toContain('> [!info] 📌 信息');
+	});
+
+	it('POST / with localhost request origin rewrites Telegraph images to PUBLIC_BASE_URL', async () => {
+		const { createPage } = await import('../src/telegraph.js');
+		const { sendPhoto, sendMessage } = await import('../src/telegram.js');
+		createPage.mockResolvedValueOnce({ url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' });
+		sendPhoto.mockResolvedValueOnce({ file_id: 'photo-file-1' });
+		sendMessage.mockResolvedValueOnce({ message_id: 100 });
+
+		const markdownWithImage = `Title: Test Article
+URL Source: https://example.com/article
+Published Time: 2024-01-01
+Markdown Content:
+
+# Test Article
+
+![cover](https://img.example.com/cover.jpg)
+
+Body.`;
+
+		fetchMock
+			.mockResolvedValueOnce(new Response(markdownWithImage, { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
+			.mockResolvedValueOnce(
+				new Response(new Uint8Array([1, 2, 3]), {
+					status: 200,
+					headers: { 'Content-Type': 'image/jpeg' },
+				}),
+			);
+
+		const request = new Request('http://127.0.0.1:8787', {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${mockEnv.API_KEY}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ url: 'https://example.com/article' }),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, telegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(sendPhoto).toHaveBeenCalledTimes(1);
+		const telegraphNodes = createPage.mock.calls[0][1];
+		const serializedNodes = JSON.stringify(telegraphNodes);
+		expect(serializedNodes).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1`);
+		expect(serializedNodes).not.toContain('127.0.0.1:8787/image-proxy');
 	});
 
 	it('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {

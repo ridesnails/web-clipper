@@ -118,55 +118,72 @@ npx wrangler dev
 
 ### 3.1 创建本地开发用的 `.dev.vars`
 
-在项目根目录新建 `.dev.vars` 文件：
+在项目根目录新建 `.dev.vars` 文件。FNS 地址、Vault/仓库名、剪藏目录也放这里，不写入 `wrangler.jsonc`：
 
 ```
+FNS_BASE=https://<你的FNS地址>
+FNS_VAULT=<你的Vault名>
+CLIP_FOLDER=Clippings
+PUBLIC_BASE_URL=https://<你的Worker公开地址>
 FNS_TOKEN=<你的FNS Token>
 API_KEY=<你自己编的API_KEY>
 JINA_API_KEY=<你的Jina API Key>
 TELEGRAPH_ACCESS_TOKEN=<你的Telegraph access_token>
-TELEGRAM_BOT_TOKEN=<你的Bot Token>
-TELEGRAM_CHAT_ID=<你的频道ID，如 -1001234567890>
-```
-
-### 3.2 把 `.dev.vars` 加入 `.gitignore`
-
-⚠️ **关键步骤，防止 Token 泄露到 GitHub**
-
-```bash
-echo ".dev.vars" >> .gitignore
-```
-
-### 3.3 修改 `wrangler.jsonc`，写入非敏感配置
-
-打开 `wrangler.jsonc`，在最外层大括号里追加 `vars` 字段。改完后整体长这样：
-
-```jsonc
-{
-	"$schema": "node_modules/wrangler/schema.json",
-	"name": "web-clipper",
-	"main": "src/index.js",
-	"compatibility_date": "2025-XX-XX",
-	"observability": {
-		"enabled": true
-	},
-	"vars": {
-		"FNS_BASE": "https://<你的FNS地址>",
-		"FNS_VAULT": "<你的Vault名>",
-		"CLIP_FOLDER": "Clippings"
-	}
-}
+IMG_BOT=<图片Bot Token>
+IMG_CHAT_ID=<图片频道/群组ID，可省略并 fallback 到 TELEGRAM_CHAT_ID>
+CLIP_BOT=<剪藏通知Bot Token>
+USER_ID=<剪藏通知接收者ID>
+# 兼容旧配置：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 仍可作为 fallback
 ```
 
 注意：
 
 - `FNS_BASE` **不带末尾斜杠**，**不带 `/api`**
-- `compatibility_date` 保持文件原值不动
-- JSON 格式严格，每个键值对之间逗号分隔，最后一项后面**不要**逗号
+- `FNS_VAULT` 是 FNS/Obsidian 中的 Vault/仓库名
+- `CLIP_FOLDER` 是剪藏落盘目录，例如 `Clippings`
+- 如果启用 Telegraph 图片代理，`PUBLIC_BASE_URL` 必须填写外网可访问的 Worker 地址，**不要**填 `localhost`、`127.0.0.1` 或局域网地址，且**不带末尾斜杠**
 
-### 3.4 给 Cloudflare 部署环境也设置 secrets
+### 3.2 把 `.dev.vars` 加入 `.gitignore`
+
+⚠️ **关键步骤，防止 Token 和个人 FNS 配置泄露到 GitHub**
 
 ```bash
+echo ".dev.vars" >> .gitignore
+```
+
+### 3.3 确认 `wrangler.jsonc` 不写 FNS 配置
+
+`wrangler.jsonc` 只保留 Worker 运行所需的非个人化配置，例如 `name`、`main`、`compatibility_date`、`observability`、`compatibility_flags` 等。
+
+不要在 `wrangler.jsonc` 里写入以下变量：
+
+```jsonc
+// 不要提交这些到 wrangler.jsonc
+// "vars": {
+//   "FNS_BASE": "https://<你的FNS地址>",
+//   "FNS_VAULT": "<你的Vault名>",
+//   "CLIP_FOLDER": "Clippings",
+//   "PUBLIC_BASE_URL": "https://<你的Worker公开地址>"
+// }
+```
+
+### 3.4 给 Cloudflare 部署环境也设置变量/Secrets
+
+由于 `.dev.vars` 只用于本地开发，部署到 Cloudflare 时需要把同名变量设置到 Worker 环境中。为避免个人 FNS 地址和 Vault 名进入仓库，建议全部通过 `wrangler secret put` 写入 Cloudflare，而不是写进 `wrangler.jsonc`：
+
+```bash
+npx wrangler secret put FNS_BASE
+# 提示后粘贴 FNS_BASE，例如 https://fns.example.com，回车
+
+npx wrangler secret put FNS_VAULT
+# 提示后粘贴 FNS_VAULT，回车
+
+npx wrangler secret put CLIP_FOLDER
+# 提示后粘贴 CLIP_FOLDER，例如 Clippings，回车
+
+npx wrangler secret put PUBLIC_BASE_URL
+# 如启用 Telegraph 图片代理，提示后粘贴 Worker 公网地址，回车
+
 npx wrangler secret put FNS_TOKEN
 # 提示后粘贴 FNS_TOKEN，回车
 
@@ -183,7 +200,7 @@ npx wrangler secret put JINA_API_KEY
 
 ### Telegraph 与 Telegram 配置（可选）
 
-如需启用 Telegraph 页面生成和 Telegram Bot 推送，需要配置以下 secrets：
+如需启用 Telegraph 页面生成和 Telegram 推送，需要配置以下 secrets。推荐拆成两个 Bot：`IMG_BOT` 负责 Telegraph 图片中转，`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。
 
 #### 1. TELEGRAPH_ACCESS_TOKEN
 
@@ -203,41 +220,47 @@ curl "https://api.telegra.ph/createAccount?short_name=YourApp&author_name=YourNa
 npx wrangler secret put TELEGRAPH_ACCESS_TOKEN
 ```
 
-#### 2. TELEGRAM_BOT_TOKEN
+#### 2. IMG_BOT / IMG_CHAT_ID（图片中转）
 
-Telegram Bot 的 API Token。
+`IMG_BOT` 是用于上传文章图片的 Telegram Bot API Token；`IMG_CHAT_ID` 是图片 Bot 所在频道或群组 ID。图片会先上传到 Telegram，再通过 Worker 的 `/image-proxy?file_id=...` 给 Telegraph 引用。
 
 获取方式：
 
 1. 在 Telegram 搜索 @BotFather
-2. 发送 `/newbot`
-3. 按提示命名 Bot
-4. 复制返回的 Token（格式：`123456789:ABCdef...`）
+2. 发送 `/newbot` 创建图片 Bot，复制 Token（格式：`123456789:ABCdef...`）
+3. 把 Bot 加入图片频道/群组并设为管理员
+4. 在频道/群组发送一条消息
+5. 访问 `https://api.telegram.org/bot<IMG_BOT>/getUpdates`
+6. 找到 `channel_post.chat.id`（频道通常以 `-100` 开头）
 
 设置命令：
 
 ```bash
-npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put IMG_BOT
+npx wrangler secret put IMG_CHAT_ID
 ```
 
-#### 3. TELEGRAM_CHAT_ID
+> 如果未设置 `IMG_CHAT_ID`，图片链路会 fallback 到旧 `TELEGRAM_CHAT_ID`。
 
-Telegram 频道或群组的 ID。
+#### 3. CLIP_BOT / USER_ID（剪藏通知）
+
+`CLIP_BOT` 是用于发送剪藏完成通知的 Telegram Bot API Token；`USER_ID` 是接收剪藏通知的用户、频道或群组 ID。消息首行会放 Telegraph 裸链接，并同时传 `link_preview_options.url`，用于触发 Telegram 即时预览。
 
 获取方式：
 
-1. 把 Bot 加入目标频道/群组，设为管理员
-2. 在频道/群组发送一条消息
-3. 访问 `https://api.telegram.org/bot<TOKEN>/getUpdates`
-4. 找到 `channel_post.chat.id`（频道通常以 `-100` 开头）
+1. 用 @BotFather 创建剪藏通知 Bot，复制 Token
+2. 把 Bot 加入目标频道/群组并设为管理员；如果推送给个人，先给 Bot 发一条消息
+3. 访问 `https://api.telegram.org/bot<CLIP_BOT>/getUpdates`
+4. 找到目标 `chat.id` 或用户 ID，填入 `USER_ID`
 
 设置命令：
 
 ```bash
-npx wrangler secret put TELEGRAM_CHAT_ID
+npx wrangler secret put CLIP_BOT
+npx wrangler secret put USER_ID
 ```
 
-> 注意：这三个变量缺一不可。缺少任何一个都不会触发 Telegraph/Telegram 推送，但 FNS 写入不受影响。
+> 兼容旧配置：如果没有拆分 Bot，也可以只设置 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`，代码会作为 fallback 使用；推荐新部署使用 `IMG_BOT` + `CLIP_BOT` + `USER_ID`。
 
 ## 4. 写入主代码
 

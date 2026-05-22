@@ -115,12 +115,32 @@ export default {
 		const slug = makeSlug(title);
 		const now = new Date();
 		const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-		const timestamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+		const timestamp = now
+			.toISOString()
+			.replace(/[-:]/g, '')
+			.replace(/\.\d{3}Z$/, 'Z');
 		const path = `${env.CLIP_FOLDER}/${yyyymm}/${timestamp}-${slug}.md`;
 
 		// 剥掉 jina 的元信息头，拼带 frontmatter 的最终内容
 		const cleanBody = stripEmptyLinks(cleanJinaBody(markdown));
-		const content = buildNote({ title, url, date: now.toISOString(), body: cleanBody });
+		let aiMetadata = null;
+		if (env.AI_API_KEY) {
+			try {
+				aiMetadata = await generateAiMetadata({ title, url, body: cleanBody, env });
+			} catch (e) {
+				console.error('AI metadata generation failed:', e.message);
+			}
+		}
+		const summary = aiMetadata?.summary || '';
+		const tags = aiMetadata?.tags || [];
+		const content = buildNote({
+			title,
+			url,
+			date: now.toISOString(),
+			body: cleanBody,
+			summary,
+			tags,
+		});
 
 		// —— 第五关：写入 FNS ——
 		try {
@@ -145,7 +165,7 @@ export default {
 			let telegraphUrl = null;
 			let telegramMessageId = null;
 
-			if (env.TELEGRAPH_ACCESS_TOKEN && env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+			if (env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID)) {
 				try {
 					// 1. 从 cleanBody（Markdown 正文）中提取所有图片 URL
 					const imageUrls = extractImageUrls(cleanBody);
@@ -165,12 +185,16 @@ export default {
 						}
 					}
 
-					// 3. 替换 cleanBody 中的图片 URL 为 Worker 代理链接
-					let telegraphMarkdown = cleanBody;
-					const origin = new URL(request.url).origin;
-					for (const mapping of imageMappings) {
-						const proxyUrl = `${origin}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}`;
-						telegraphMarkdown = telegraphMarkdown.replaceAll(mapping.original, proxyUrl);
+					// 3. 替换 cleanBody 中的图片 URL 为 Worker 代理链接，并补充 AI 摘要/标签
+					let telegraphMarkdown = buildTelegraphMarkdown({ body: cleanBody, summary, tags });
+					const publicBaseUrl = resolvePublicBaseUrl(request.url, env.PUBLIC_BASE_URL);
+					if (publicBaseUrl) {
+						for (const mapping of imageMappings) {
+							const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}`;
+							telegraphMarkdown = telegraphMarkdown.replaceAll(mapping.original, proxyUrl);
+						}
+					} else if (imageMappings.length > 0) {
+						console.warn('Skip Telegraph image proxy replacement: no public base URL available');
 					}
 
 					// 4. 转换 Markdown 为 Telegraph Node 数组
@@ -181,14 +205,13 @@ export default {
 					telegraphUrl = pageResult.url;
 
 					// 6. 发送 Telegram 消息
-					let hostname;
-					try {
-						hostname = escapeHtml(new URL(url).hostname);
-					} catch {
-						hostname = url;
-					}
-					const msgText = `<b>${escapeHtml(title)}</b>\n\n<a href="${url}">${hostname}</a>\n\n${telegraphUrl}\n\n#webclipper`;
-					const msgResult = await sendMessage(msgText, env.TELEGRAM_CHAT_ID, env);
+					const hostname = escapeHtml(getHostname(url));
+					const sourceLink = escapeHtmlAttr(url);
+					const summaryBlock = summary ? `\n\n${escapeHtml(summary)}` : '';
+					const tagLine = formatTagLine(tags);
+					const tagBlock = tagLine ? `\n\n${escapeHtml(tagLine)}` : '';
+					const msgText = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(title)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}\n\n#webclipper`;
+					const msgResult = await sendMessage(msgText, env.USER_ID || env.TELEGRAM_CHAT_ID, env, { linkPreviewUrl: telegraphUrl });
 					telegramMessageId = msgResult.message_id;
 
 					console.log('Telegraph/Telegram pushed:', telegraphUrl, telegramMessageId);
@@ -226,6 +249,42 @@ function isValidUrl(s) {
 	} catch {
 		return false;
 	}
+}
+
+function resolvePublicBaseUrl(requestUrl, configuredBaseUrl) {
+	const configured = normalizePublicBaseUrl(configuredBaseUrl);
+	if (configured) return configured;
+	return normalizePublicBaseUrl(requestUrl);
+}
+
+function normalizePublicBaseUrl(value) {
+	if (!value) return null;
+	try {
+		const url = new URL(value);
+		if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+		if (isPrivateHostname(url.hostname)) return null;
+		return url.origin.replace(/\/$/, '');
+	} catch {
+		return null;
+	}
+}
+
+function isPrivateHostname(hostname) {
+	const host = String(hostname || '')
+		.trim()
+		.toLowerCase()
+		.replace(/^\[|\]$/g, '');
+	if (!host) return true;
+	if (host === 'localhost' || host.endsWith('.localhost')) return true;
+	if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
+	if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return false;
+	const parts = host.split('.').map(Number);
+	const [a, b] = parts;
+	if (a === 10 || a === 127 || a === 0) return true;
+	if (a === 169 && b === 254) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
+	if (a === 192 && b === 168) return true;
+	return false;
 }
 
 // 从 jina 返回的 markdown 抽标题
@@ -280,10 +339,76 @@ function cleanJinaBody(md) {
 }
 
 // 拼带 frontmatter 的 markdown 文件
-function buildNote({ title, url, date, body }) {
-	// YAML frontmatter 里的字符串需要转义双引号
-	const safeTitle = title.replace(/"/g, '\\"');
-	return `---\ntitle: "${safeTitle}"\nurl: ${url}\ndate: ${date}\nsource: clipper\n---\n\n${body}`;
+function buildNote({ title, url, date, body, summary, tags = [] }) {
+	const safeTitle = yamlEscape(title);
+	const normalizedBody = stripLeadingDuplicateTitle(body, title);
+	const hostname = getHostname(url);
+	const tagLine = formatTagLine(tags);
+	const frontmatter = ['---', `title: "${safeTitle}"`, `url: ${url}`, `date: ${date}`, 'source: clipper'];
+	if (tags.length > 0) {
+		frontmatter.push('tags:');
+		for (const tag of tags) {
+			frontmatter.push(`  - ${yamlEscape(tag)}`);
+		}
+	}
+	if (summary) {
+		frontmatter.push(`summary: "${yamlEscape(summary)}"`);
+	}
+	frontmatter.push('---');
+
+	const sections = [`# ${title}`, ''];
+	if (summary) {
+		sections.push('> [!abstract] ✨ 摘要', `> ${summary}`, '');
+	}
+
+	sections.push('> [!info] 📌 信息');
+	if (hostname) sections.push(`> - **来源**：[${hostname}](${url})`);
+	sections.push(`> - **时间**：${date}`);
+	if (tagLine) sections.push(`> - **标签**：${tagLine}`);
+	sections.push(`> - **链接**：[原文链接](${url})`, '');
+	sections.push('## 📄 正文', '', normalizedBody);
+	return [...frontmatter, '', ...sections].join('\n');
+}
+
+function buildTelegraphMarkdown({ body, summary, tags = [] }) {
+	const sections = [];
+	if (summary) {
+		sections.push('## 摘要', '', summary, '');
+	}
+	const tagLine = formatTagLine(tags);
+	if (tagLine) {
+		sections.push(`标签：${tagLine}`, '');
+	}
+	sections.push(body);
+	return sections.join('\n');
+}
+
+function getHostname(url) {
+	try {
+		return new URL(url).hostname;
+	} catch {
+		return String(url || '');
+	}
+}
+
+function escapeHtmlAttr(str) {
+	return escapeHtml(String(str || '')).replace(/"/g, '&quot;');
+}
+
+function formatTagLine(tags = []) {
+	return tags
+		.map((tag) => normalizeHashtag(tag))
+		.filter(Boolean)
+		.map((tag) => `#${tag}`)
+		.join(' ');
+}
+
+function normalizeHashtag(tag) {
+	return String(tag || '')
+		.trim()
+		.replace(/\s+/g, '_')
+		.replace(/-/g, '_')
+		.replace(/[^\w\u4e00-\u9fff]/g, '');
 }
 
 // 从 Markdown 中提取所有图片 URL
@@ -297,12 +422,94 @@ function extractImageUrls(md) {
 	return [...new Set(urls)]; // 去重
 }
 
+function stripLeadingDuplicateTitle(body, title) {
+	const normalizedTitle = normalizeComparableText(title);
+	if (!normalizedTitle) return body;
+	const match = body.match(/^(\s*#\s+(.+?)\s*)(?:\n+|$)/);
+	if (!match) return body;
+	if (normalizeComparableText(match[2]) !== normalizedTitle) return body;
+	return body.slice(match[0].length).replace(/^\s+/, '');
+}
+
+function normalizeComparableText(str) {
+	return String(str || '')
+		.trim()
+		.toLowerCase()
+		.replace(/[\s\-–—_]+/g, ' ');
+}
+
+function yamlEscape(str) {
+	return String(str).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 // HTML 特殊字符转义（用于 Telegram HTML parse_mode）
 function escapeHtml(str) {
 	return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-export { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks, extractImageUrls, escapeHtml };
+function parseAiJsonResponse(text) {
+	const trimmed = String(text || '').trim();
+	const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+	const jsonText = fenced ? fenced[1] : trimmed;
+	const parsed = JSON.parse(jsonText);
+	const summary = typeof parsed.summary === 'string' ? parsed.summary.trim() : '';
+	const tags = Array.isArray(parsed.tags) ? [...new Set(parsed.tags.map((tag) => String(tag).trim()).filter(Boolean))].slice(0, 8) : [];
+	return { summary, tags };
+}
+
+async function generateAiMetadata({ title, url, body, env }) {
+	if (!env.AI_API_KEY) return null;
+	const baseUrl = (env.AI_BASE_URL || 'https://api.siliconflow.cn/v1').replace(/\/$/, '');
+	const model = env.AI_MODEL || 'Qwen/Qwen3-8B';
+	const prompt = [
+		'请根据以下网页剪藏内容生成中文摘要和标签。',
+		'要求：只返回 JSON，不要解释，不要 markdown 代码块。',
+		'JSON 格式：{"summary":"不超过120字","tags":["标签1","标签2"]}',
+		'标签要求：2到6个，简短，不带#。',
+		`标题：${title}`,
+		`原始链接：${url}`,
+		'正文：',
+		body.slice(0, 12000),
+	].join('\n');
+	const res = await fetch(`${baseUrl}/chat/completions`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${env.AI_API_KEY}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			model,
+			temperature: 0.2,
+			response_format: { type: 'json_object' },
+			messages: [
+				{ role: 'system', content: 'You generate concise article metadata in JSON.' },
+				{ role: 'user', content: prompt },
+			],
+		}),
+	});
+	if (!res.ok) {
+		const errText = await res.text();
+		throw new Error(`AI metadata failed: ${res.status} ${errText}`);
+	}
+	const data = await res.json();
+	const content = data?.choices?.[0]?.message?.content;
+	if (!content) {
+		throw new Error('AI metadata failed: empty response');
+	}
+	return parseAiJsonResponse(content);
+}
+
+export {
+	isValidUrl,
+	extractTitle,
+	makeSlug,
+	cleanJinaBody,
+	buildNote,
+	stripEmptyLinks,
+	extractImageUrls,
+	escapeHtml,
+	buildTelegraphMarkdown,
+};
 
 // 过滤掉 Markdown 中空文本的链接（Jina 提取的 heading anchor links）
 function stripEmptyLinks(md) {
