@@ -127,18 +127,6 @@ export function markdownToTelegraphNodes(markdown) {
 		return children;
 	}
 
-	function parseTableRow(line) {
-		return line
-			.split('|')
-			.map((cell) => cell.trim())
-			.filter((cell, idx, arr) => {
-				// 过滤掉首尾的空单元格（由行首/行尾的 | 产生）
-				if (idx === 0 && cell === '') return false;
-				if (idx === arr.length - 1 && cell === '') return false;
-				return true;
-			});
-	}
-
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 
@@ -221,7 +209,7 @@ export function markdownToTelegraphNodes(markdown) {
 			continue;
 		}
 
-		// 表格检测
+		// 表格检测（Telegraph 不支持 table 标签，转为 pre/code 块保留原始格式）
 		if (line.includes('|')) {
 			// 向前看：检查当前行和后续行是否构成表格
 			const tableLines = [];
@@ -231,29 +219,13 @@ export function markdownToTelegraphNodes(markdown) {
 				j++;
 			}
 
-			// 至少需要两行（表头 + 分隔符）
-			if (tableLines.length >= 2 && /^\s*\|?[\s\-:|]+\|?[\s\-:|]*$/.test(tableLines[1])) {
+			// 至少需要两行，且第二行是分格线，或者所有行都是表格行（Jina 有时省略分隔行）
+			const isSeparator = (line) => /^\s*\|?[\s\-:|]+\|?[\s\-:|]*$/.test(line);
+			const hasSeparator = tableLines.length >= 2 && isSeparator(tableLines[1]);
+			const isTable = hasSeparator || (tableLines.length >= 2 && tableLines.every((l) => l.includes('|')));
+			if (isTable) {
 				flushList();
-				const headers = parseTableRow(tableLines[0]);
-				const rows = tableLines
-					.slice(2)
-					.map(parseTableRow)
-					.filter((r) => r.length > 0);
-
-				const tableNode = { tag: 'table', children: [] };
-				// 表头行
-				tableNode.children.push({
-					tag: 'tr',
-					children: headers.map((h) => ({ tag: 'th', children: parseInline(h.trim()) })),
-				});
-				// 数据行
-				for (const row of rows) {
-					tableNode.children.push({
-						tag: 'tr',
-						children: row.map((cell) => ({ tag: 'td', children: parseInline(cell.trim()) })),
-					});
-				}
-				nodes.push(tableNode);
+				nodes.push({ tag: 'pre', children: [{ tag: 'code', children: [tableLines.join('\n')] }] });
 				i = j - 1; // 跳过已处理的行
 				continue;
 			}

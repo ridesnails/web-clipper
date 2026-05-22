@@ -1,16 +1,34 @@
 {
-	"yoloMode": true,
-	"planMode": true,
-	"vulnerabilityHuntingMode": false,
-	"toolSearchEnabled": true,
-	"hybridCompressEnabled": true,
-	"teamMode": true,
-	"mcpServers": {
-		"github": {
-			"command": "npx",
-			"args": ["-y", "@modelcontextprotocol/server-github"],
-			"env": {},
-			"enabled": true
-		}
-	}
+  "yoloMode": true,
+  "planMode": true,
+  "vulnerabilityHuntingMode": false,
+  "toolSearchEnabled": true,
+  "hybridCompressEnabled": true,
+  "teamMode": true,
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {},
+      "enabled": true
+    }
+  },
+  "codebase": {
+    "enabled": false,
+    "enableAgentReview": true,
+    "enableReranking": false,
+    "batch": {
+      "maxLines": 10,
+      "concurrency": 3
+    },
+    "chunking": {
+      "maxLinesPerChunk": 200,
+      "minLinesPerChunk": 10,
+      "minCharsPerChunk": 20,
+      "overlapLines": 20
+    }
+  }
 }

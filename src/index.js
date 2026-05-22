@@ -33,98 +33,7 @@ export default {
 				}
 				return new Response(fileRes.body, {
 					headers: {
-						'Content-Type': mimeTypeFromPath(fileInfo.file_path) || fileRes.headers.get('Content-Type') || 'image/jpeg',
-						'Cache-Control': 'public, max-age=86400',
-					},
-				});
-			} catch (e) {
-				return Response.json({ error: e.message }, { status: 502 });
-			}
-		}
-
-		// 处理 CORS 预检请求
-		if (request.method === 'OPTIONS') {
-			return new Response(null, { status: 204, headers: corsHeaders(env) });
-		}
-
-		// HEAD、GET、PUT、DELETE 等不允许的方法统一返回 405
-		if (request.method !== 'POST') {
-			return Response.json({ error: 'Method not allowed. Use POST.' }, { status: 405, headers: corsHeaders(env) });
-		}
-
-		// —— 第一关：密码校验 ——
-		const auth = request.headers.get('Authorization');
-		if (auth !== `Bearer ${env.API_KEY}`) {
-			return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(env) });
-		}
-
-		// —— 第二关：解析 body ——
-		let reqBody;
-		try {
-			reqBody = await request.json();
-		} catch {
-			return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
-		}
-		const url = reqBody.url;
-		if (!url || typeof url !== 'string') {
-			return Response.json({ error: "Missing 'url' field" }, { status: 400, headers: corsHeaders(env) });
-		}
-		if (!isValidUrl(url)) {
-			return Response.json({ error: 'Invalid url (must be http or https)' }, { status: 400, headers: corsHeaders(env) });
-		}
-
-		// —— 第三关：用 jina 把网页转成 Markdown ——
-		let markdown;
-		try {
-			const jinaHeaders = { Accept: 'text/plain' };
-			// 如果配置了 JINA_API_KEY，则添加认证头
-			if (env.JINA_API_KEY) {
-				jinaHeaders.Authorization = `Bearer ${env.JINA_API_KEY}`;
-			}
-
-			let jinaRes;
-			let lastErr;
-			for (let attempt = 0; attempt <= 2; attempt++) {
-				if (attempt > 0) {
-					const delay = attempt === 1 ? 1000 : 2000;
-					await new Promise((r) => setTimeout(r, delay));
-				}
-				jinaRes = await fetch(`https://r.jina.ai/${url}`,import { sendPhoto, sendMessage, getFile } from './telegram.js';
-import { createPage, markdownToTelegraphNodes } from './telegraph.js';
-
-// CORS 响应头
-function corsHeaders(env) {
-	return {
-		'Access-Control-Allow-Origin': env.CORS_ORIGIN || '*',
-		'Access-Control-Allow-Methods': 'POST, OPTIONS',
-		'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-	};
-}
-
-export default {
-	async fetch(request, env) {
-		const { pathname } = new URL(request.url);
-
-		// 浏览器自动请求的 favicon.ico 直接返回 204，避免日志噪音
-		if (pathname === '/favicon.ico') {
-			return new Response(null, { status: 204 });
-		}
-
-		// Telegraph 图片代理：将 Telegram file_id 转为可直接访问的图片 URL
-		if (pathname === '/image-proxy') {
-			const fileId = new URL(request.url).searchParams.get('file_id');
-			if (!fileId) {
-				return Response.json({ error: 'Missing file_id' }, { status: 400 });
-			}
-			try {
-				const fileInfo = await getFile(fileId, env);
-				const fileRes = await fetch(fileInfo.file_url, { signal: AbortSignal.timeout(15000) });
-				if (!fileRes.ok) {
-					return Response.json({ error: 'Image fetch failed' }, { status: 502 });
-				}
-				return new Response(fileRes.body, {
-					headers: {
-						'Content-Type': mimeTypeFromPath(fileInfo.file_path) || fileRes.headers.get('Content-Type') || 'image/jpeg',
+						'Content-Type': fileRes.headers.get('Content-Type') || 'image/jpeg',
 						'Cache-Control': 'public, max-age=86400',
 					},
 				});
@@ -271,13 +180,13 @@ export default {
 					telegraphUrl = pageResult.url;
 
 					// 6. 发送 Telegram 消息
-					let msgText;
+					let hostname;
 					try {
-						const hostname = escapeHtml(new URL(url).hostname);
-						msgText = `<b>${escapeHtml(title)}</b>\n\n<a href="${url}">${hostname}</a>\n\n${telegraphUrl}\n\n#webclipper`;
+						hostname = escapeHtml(new URL(url).hostname);
 					} catch {
-						msgText = `<b>${escapeHtml(title)}</b>\n\n${url}\n\n${telegraphUrl}\n\n#webclipper`;
+						hostname = url;
 					}
+					const msgText = `<b>${escapeHtml(title)}</b>\n\n<a href="${url}">${hostname}</a>\n\n${telegraphUrl}\n\n#webclipper`;
 					const msgResult = await sendMessage(msgText, env.TELEGRAM_CHAT_ID, env);
 					telegramMessageId = msgResult.message_id;
 
@@ -392,27 +301,9 @@ function escapeHtml(str) {
 	return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+export { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks, extractImageUrls, escapeHtml };
+
 // 过滤掉 Markdown 中空文本的链接（Jina 提取的 heading anchor links）
 function stripEmptyLinks(md) {
-	// 匹配 [](url) 或 [ ](url) 或 [\u200B](url)（零宽空格）
 	return md.replace(/\[(?:\s|\u200B)*\]\(https?:\/\/[^)]+\)/g, '');
 }
-
-// 根据文件路径扩展名推断 MIME 类型（Telegram CDN 常返回 application/octet-stream）
-function mimeTypeFromPath(filePath) {
-	if (!filePath) return null;
-	const ext = filePath.split('.').pop().toLowerCase();
-	const map = {
-		jpg: 'image/jpeg',
-		jpeg: 'image/jpeg',
-		png: 'image/png',
-		gif: 'image/gif',
-		webp: 'image/webp',
-		bmp: 'image/bmp',
-		svg: 'image/svg+xml',
-		ico: 'image/x-icon',
-	};
-	return map[ext] || null;
-}
-
-export { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks, extractImageUrls, escapeHtml };

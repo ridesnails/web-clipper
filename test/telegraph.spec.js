@@ -151,17 +151,15 @@ describe('markdownToTelegraphNodes', () => {
 		expect(markdownToTelegraphNodes('   ')).toEqual([]);
 	});
 
-	it('GFM 表格转为 table 标签', () => {
+	it('GFM 表格转为 pre/code 块（Telegraph 不支持 table 标签）', () => {
 		const md = '| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |';
 		const nodes = markdownToTelegraphNodes(md);
 		expect(nodes).toHaveLength(1);
-		expect(nodes[0].tag).toBe('table');
-		expect(nodes[0].children).toHaveLength(3); // 1 header + 2 data rows
-		expect(nodes[0].children[0].tag).toBe('tr');
-		expect(nodes[0].children[0].children[0].tag).toBe('th');
-		expect(nodes[0].children[0].children[0].children).toEqual(['Name']);
-		expect(nodes[0].children[1].children[0].tag).toBe('td');
-		expect(nodes[0].children[1].children[0].children).toEqual(['Alice']);
+		expect(nodes[0].tag).toBe('pre');
+		expect(nodes[0].children[0].tag).toBe('code');
+		const codeText = nodes[0].children[0].children[0];
+		expect(codeText).toContain('| Name | Age |');
+		expect(codeText).toContain('| Alice | 30 |');
 	});
 
 	it('空文本链接 [](url) 被过滤', () => {
