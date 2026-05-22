@@ -344,7 +344,7 @@ describe('Integration with mocked fetch', () => {
 		const json = await response.json();
 		expect(json.ok).toBe(true);
 		expect(json.title).toBe('Test Article');
-		expect(json.path).toMatch(/^Clippings\/\d{4}-\d{2}\/Test-Article\.md$/);
+		expect(json.path).toMatch(/^Clippings\/\d{4}-\d{2}\/\d{8}T\d{6}Z-Test-Article\.md$/);
 	});
 
 	it('Mock Jina failure (non-200) - verify 502', async () => {

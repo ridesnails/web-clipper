@@ -115,7 +115,8 @@ export default {
 		const slug = makeSlug(title);
 		const now = new Date();
 		const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-		const path = `${env.CLIP_FOLDER}/${yyyymm}/${slug}.md`;
+		const timestamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+		const path = `${env.CLIP_FOLDER}/${yyyymm}/${timestamp}-${slug}.md`;
 
 		// 剥掉 jina 的元信息头，拼带 frontmatter 的最终内容
 		const cleanBody = stripEmptyLinks(cleanJinaBody(markdown));
