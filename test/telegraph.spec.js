@@ -193,4 +193,20 @@ describe('markdownToTelegraphNodes', () => {
 		expect(link.attrs.href).toBe('http://example.com');
 		expect(link.children).toEqual(['here']);
 	});
+
+	it('带 title 的 Markdown 链接正常保留 href 和文本', () => {
+		const md = '[🚀 快速部署](https://cfbed.sanyue.de/deployment/docker.html#quick "🚀 快速部署")';
+		const nodes = markdownToTelegraphNodes(md);
+		const link = nodes[0].children.find((child) => typeof child === 'object' && child.tag === 'a');
+		expect(link).toBeDefined();
+		expect(link.attrs.href).toBe('https://cfbed.sanyue.de/deployment/docker.html#quick');
+		expect(link.children).toEqual(['🚀 快速部署']);
+	});
+
+	it('代码块保留换行', () => {
+		const md = '```\nmkdir cloudflare-imgbed\ncd cloudflare-imgbed\n```';
+		const nodes = markdownToTelegraphNodes(md);
+		const codeText = nodes[0].children[0].children[0];
+		expect(codeText).toBe('mkdir cloudflare-imgbed\ncd cloudflare-imgbed');
+	});
 });

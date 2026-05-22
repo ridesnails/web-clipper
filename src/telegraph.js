@@ -93,7 +93,8 @@ export function htmlToTelegraphNodes(html) {
 			continue;
 		}
 
-		const text = decodeHtml(token.replace(/\s+/g, ' '));
+		const parentTag = stack[stack.length - 1].tag;
+		const text = parentTag === 'pre' || parentTag === 'code' ? decodeHtml(token) : decodeHtml(token.replace(/\s+/g, ' '));
 		if (text) appendChild(stack[stack.length - 1], text);
 	}
 
@@ -233,8 +234,8 @@ function markdownToHtml(markdown) {
 
 function parseInline(text) {
 	let s = escapeHtml(text);
-	s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, '<img src="$2">');
-	s = s.replace(/\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, (_match, label, href) => {
+	s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, '<img src="$2">');
+	s = s.replace(/\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, label, href) => {
 		const visibleLabel = label.replace(/\u200B/g, '').trim();
 		if (!visibleLabel) return '';
 		return `<a href="${href}">${label}</a>`;
