@@ -16,31 +16,121 @@
 ## 工作原理
 
 ```
-┌──────────────────────┐
-│  iOS Shortcut /      │
-│  Browser Bookmarklet │  ──── POST {url: "..."} ────┐
-│  curl / Telegram     │                              │
-└──────────────────────┘                              ▼
-                                          ┌──────────────────────┐
-                                          │  Cloudflare Worker   │
-                                          │  (web-clipper)       │
-                                          │                      │
-                                          │  1. 鉴权             │
-                                          │  2. 调 Jina Reader   │──── GET r.jina.ai/<url>
-                                          │  3. 抽标题/清理正文   │
-                                          │  4. 拼 frontmatter    │
-                                          │  5. POST 到 FNS      │──── POST /api/note
-                                          └──────────────────────┘             │
-                                                                                ▼
-                                                                ┌──────────────────────┐
-                                                                │  Fast Note Sync       │
-                                                                │  Service (FNS)        │
-                                                                │                       │
-                                                                │  写入 Obsidian Vault  │
-                                                                │  WebSocket 推送到     │
-                                                                │  所有在线设备         │
-                                                                └──────────────────────┘
+┌─────────────────────────────┐
+│ 入口 A：POST /              │
+│ iOS Shortcut / Bookmarklet  │
+│ curl / 任意 HTTP 客户端     │
+└──────────────┬──────────────┘
+               │
+               │  POST {url: "..."}
+               │
+┌──────────────▼──────────────┐
+│ 入口 B：Telegram Bot        │
+│ 发链接给 CLIP_BOT           │
+└──────────────┬──────────────┘
+               │
+               │  Telegram webhook
+               ▼
+┌─────────────────────────────┐
+│ Cloudflare Worker           │
+│ web-clipper                 │
+│                             │
+│ 1. 提取 URL                 │
+│ 2. 调 Jina Reader           │
+│ 3. 清理正文 / 生成 frontmatter│
+│ 4. 写入 FNS                 │
+│ 5. 可选 Telegraph/Telegram  │
+└──────────────┬──────────────┘
+               │
+               ▼
+┌─────────────────────────────┐
+│ Fast Note Sync Service      │
+│ 写入 Obsidian Vault         │
+└─────────────────────────────┘
 ```
+
+## 两个入口
+
+### 1. HTTP 入口：`POST /`
+
+适合：
+
+- iOS Shortcut
+- 浏览器 Bookmarklet
+- `curl`
+- 任何能发 HTTP 请求的客户端
+
+请求格式：
+
+**Headers**
+
+| Name            | Required | Description        |
+| --------------- | -------- | ------------------ |
+| `Authorization` | ✅       | `Bearer <API_KEY>` |
+| `Content-Type`  | ✅       | `application/json` |
+
+**Body**
+
+```json
+{
+	"url": "https://example.com/article"
+}
+```
+
+**成功响应**
+
+```json
+{
+	"ok": true,
+	"title": "Article Title",
+	"path": "Clippings/2026-05/Article-Title.md",
+	"telegraphUrl": "https://telegra.ph/Article-Title-05-21",
+	"telegramMessageId": 123
+}
+```
+
+- `telegraphUrl` 和 `telegramMessageId` 仅在配置了 Telegraph + Telegram 且推送成功时返回。
+
+**失败响应**
+
+非 2xx 状态码 + JSON 错误信息 `{ "error": "..." }`。常见状态码：
+
+- `400` —— 请求格式错误（URL 缺失、不是 http/https）
+- `401` —— `API_KEY` 错误或缺失
+- `502` —— Jina 抓取失败 / FNS 写入失败
+
+### 2. Telegram 入口：`CLIP_BOT`
+
+适合：
+
+- 手机上直接转发链接
+- Telegram 作为日常剪藏入口
+
+工作方式：
+
+- 你把网页链接直接发给 `CLIP_BOT`
+- Telegram 把消息投递到 Worker 的 `/telegram-webhook`
+- Worker 校验 `TELEGRAM_WEBHOOK_SECRET`
+- Worker 校验 `USER_ID` 白名单
+- Worker 提取消息里的第一个 URL
+- 然后复用和 `POST /` 完全相同的剪藏主流程
+
+行为约定：
+
+- 成功时：**不额外回复一条“成功”消息**
+- 成功通知：仍沿用原有 Telegraph/Telegram 正常通知
+- 无链接时：Bot 回复简短提示
+- 剪藏失败时：Bot 回复简短错误
+
+## 剪藏主链路
+
+不管入口来自 `POST /` 还是 `CLIP_BOT`，真正执行的都是同一条链路：
+
+1. 提取 URL
+2. 调 Jina Reader 抓网页正文
+3. 抽标题、清理正文、生成 frontmatter
+4. 写入 FNS / Obsidian
+5. 如果已配置 Telegraph/Telegram，则继续做推送
 
 ## 输出格式
 
@@ -70,52 +160,9 @@ summary: "一段可选 AI 摘要"
 （jina 抽取出的正文 markdown，元信息头已剥离）
 ```
 
-## API
+## CORS
 
-### `POST /`
-
-唯一端点。请求剪藏一个 URL。
-
-**Headers**
-
-| Name            | Required | Description        |
-| --------------- | -------- | ------------------ |
-| `Authorization` | ✅       | `Bearer <API_KEY>` |
-| `Content-Type`  | ✅       | `application/json` |
-
-**Body**
-
-```json
-{
-	"url": "https://example.com/article"
-}
-```
-
-**Response（成功）**
-
-```json
-{
-	"ok": true,
-	"title": "Article Title",
-	"path": "Clippings/2026-05/Article-Title.md",
-	"telegraphUrl": "https://telegra.ph/Article-Title-05-21",
-	"telegramMessageId": 123
-}
-```
-
-- `telegraphUrl` 和 `telegramMessageId` 仅在配置了 Telegraph + Telegram 环境变量且推送成功时返回。若未配置或推送失败，这两个字段不存在。
-
-**Response（失败）**
-
-非 2xx 状态码 + JSON 错误信息 `{ "error": "..." }`。常见状态码：
-
-- `400` —— 请求格式错误（URL 缺失、不是 http/https）
-- `401` —— `API_KEY` 错误或缺失
-- `502` —— Jina 抓取失败 / FNS 写入失败（详细信息在 `wrangler tail` 日志里）
-
-**CORS 支持**
-
-所有响应均包含 CORS 头，支持浏览器 Bookmarklet 直接调用：
+`POST /` 的所有响应均包含 CORS 头，支持浏览器 Bookmarklet 直接调用：
 
 - `Access-Control-Allow-Origin: *`
 - `Access-Control-Allow-Methods: POST, OPTIONS`
@@ -127,7 +174,7 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 - `GET /favicon.ico` —— 返回 `204 No Content`（避免浏览器请求图标时产生 404 噪音）
 
-### Telegraph 与 Telegram 推送
+## Telegraph 与 Telegram 推送
 
 当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、剪藏通知 Bot（`CLIP_BOT` + `USER_ID`，兼容旧 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`）时，FNS 写入成功后 Worker 会自动：
 
@@ -148,12 +195,6 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 **环境变量**：推荐使用 `IMG_BOT` 负责图片、`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。配置方法参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
-### Telegram Bot 剪藏入口
-
-配置 `CLIP_BOT`、`USER_ID` 和 `TELEGRAM_WEBHOOK_SECRET` 后，可以把网页链接直接发给 `CLIP_BOT`。Telegram 会通过 `/telegram-webhook` 调用 Worker，Worker 校验 webhook secret 和 `USER_ID` 白名单后，复用同一套剪藏流程。
-
-成功剪藏后不额外回复一条“成功”消息，仍沿用上面的 Telegraph/Telegram 正常通知。无链接或剪藏失败时，Bot 会回复一条简短提示。
-
 ## 项目结构
 
 ```text
@@ -163,9 +204,11 @@ src/
 └── telegram.js   # Telegram sendPhoto / sendMessage / getFile API 封装
 ```
 
-## 客户端接入示例
+## 使用示例
 
-### iOS Shortcut
+### HTTP 入口示例
+
+#### iOS Shortcut
 
 「快捷指令」app → 新建 → 添加「获取 URL 内容」动作：
 
@@ -178,7 +221,7 @@ src/
 
 启用「在分享菜单中显示」，接受类型勾选「URL」。从 Safari 分享菜单一键剪藏。
 
-### 浏览器 Bookmarklet
+#### 浏览器 Bookmarklet
 
 把以下代码保存为浏览器书签（替换 `WORKER_URL` 和 `API_KEY`）：
 
@@ -198,7 +241,7 @@ javascript: (function () {
 })();
 ```
 
-### curl
+#### curl
 
 ```bash
 curl -X POST https://web-clipper.<your>.workers.dev \
@@ -206,6 +249,22 @@ curl -X POST https://web-clipper.<your>.workers.dev \
   -H "Content-Type: application/json" \
   -d '{"url":"https://example.com"}'
 ```
+
+### Telegram 入口示例
+
+直接给 `CLIP_BOT` 发以下任意一种消息：
+
+```text
+https://example.com/article
+```
+
+或：
+
+```text
+帮我剪藏这个：https://example.com/article
+```
+
+Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 
 ## 部署
 
