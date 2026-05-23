@@ -635,3 +635,82 @@ describe('Image proxy route', () => {
 		expect(response.status).toBe(502);
 	});
 });
+
+// 8. Telegram webhook 剪藏入口测试
+describe('Telegram webhook clip entry', () => {
+	const webhookEnv = {
+		...mockEnv,
+		TELEGRAM_WEBHOOK_SECRET: 'test-webhook-secret',
+		CLIP_BOT: '222222:CLIPbotToken',
+		USER_ID: '987654321',
+	};
+
+	function createTelegramWebhookRequest(update, secret = webhookEnv.TELEGRAM_WEBHOOK_SECRET) {
+		const headers = { 'Content-Type': 'application/json' };
+		if (secret) headers['X-Telegram-Bot-Api-Secret-Token'] = secret;
+		return new Request('https://clip.example.com/telegram-webhook', {
+			method: 'POST',
+			headers,
+			body: JSON.stringify(update),
+		});
+	}
+
+	function createTelegramUpdate(text, fromId = webhookEnv.USER_ID, chatId = webhookEnv.USER_ID) {
+		return {
+			update_id: 1,
+			message: {
+				message_id: 10,
+				from: { id: Number(fromId) },
+				chat: { id: Number(chatId), type: 'private' },
+				text,
+			},
+		};
+	}
+
+	it('secret 不匹配时静默忽略', async () => {
+		const request = createTelegramWebhookRequest(createTelegramUpdate('https://example.com/article'), 'wrong-secret');
+		const response = await worker.fetch(request, webhookEnv, createExecutionContext());
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ ok: true });
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('非 USER_ID 白名单用户时静默忽略', async () => {
+		const request = createTelegramWebhookRequest(createTelegramUpdate('https://example.com/article', '123456', '123456'));
+		const response = await worker.fetch(request, webhookEnv, createExecutionContext());
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ ok: true });
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('无链接时回复提示', async () => {
+		fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 20 } }), { status: 200 }));
+
+		const request = createTelegramWebhookRequest(createTelegramUpdate('hello'));
+		const response = await worker.fetch(request, webhookEnv, createExecutionContext());
+
+		expect(response.status).toBe(200);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0][0]).toBe(`https://api.telegram.org/bot${webhookEnv.CLIP_BOT}/sendMessage`);
+		const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
+		expect(String(payload.chat_id)).toBe(webhookEnv.USER_ID);
+		expect(payload.text).toContain('请发送一个 http/https 网页链接');
+	});
+
+	it('收到链接时复用剪藏流程，成功后不额外回复', async () => {
+		fetchMock
+			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+
+		const request = createTelegramWebhookRequest(createTelegramUpdate('请剪藏 https://example.com/article'));
+		const response = await worker.fetch(request, webhookEnv, createExecutionContext());
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ ok: true });
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0][0]).toBe('https://r.jina.ai/https://example.com/article');
+		expect(fetchMock.mock.calls[1][0]).toBe(`${webhookEnv.FNS_BASE}/api/note`);
+	});
+});

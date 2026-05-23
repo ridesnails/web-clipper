@@ -10,7 +10,7 @@ function corsHeaders(env) {
 	};
 }
 
-export default {
+const worker = {
 	async fetch(request, env) {
 		const { pathname } = new URL(request.url);
 
@@ -40,6 +40,11 @@ export default {
 			} catch (e) {
 				return Response.json({ error: e.message }, { status: 502 });
 			}
+		}
+
+		// Telegram Bot 剪藏入口：CLIP_BOT 收到链接后由 webhook 转入现有剪藏流程
+		if (pathname === '/telegram-webhook') {
+			return handleTelegramWebhook(request, env);
 		}
 
 		// 处理 CORS 预检请求
@@ -244,7 +249,95 @@ export default {
 	},
 };
 
+export default worker;
+
 // —— 工具函数 ——
+
+async function handleTelegramWebhook(request, env) {
+	if (request.method !== 'POST') {
+		return Response.json({ ok: true });
+	}
+	if (!isValidTelegramWebhookSecret(request, env)) {
+		return Response.json({ ok: true });
+	}
+
+	let update;
+	try {
+		update = await request.json();
+	} catch {
+		return Response.json({ ok: true });
+	}
+
+	const message = update.message || update.edited_message;
+	const chatId = message?.chat?.id;
+	if (!message || !isAllowedTelegramUser(message, env)) {
+		return Response.json({ ok: true });
+	}
+
+	const url = extractFirstUrlFromTelegramMessage(message);
+	if (!url) {
+		await notifyTelegramWebhookError(chatId, '请发送一个 http/https 网页链接。', env);
+		return Response.json({ ok: true });
+	}
+
+	try {
+		const clipRequest = new Request(new URL('/', request.url), {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${env.API_KEY}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({ url }),
+		});
+		const response = await worker.fetch(clipRequest, env);
+		if (!response.ok) {
+			const errorText = await response.text();
+			throw new Error(errorText.slice(0, 500));
+		}
+	} catch (e) {
+		console.error('Telegram webhook clip failed:', e.message);
+		await notifyTelegramWebhookError(chatId, `剪藏失败：${e.message}`, env);
+	}
+
+	return Response.json({ ok: true });
+}
+
+function isValidTelegramWebhookSecret(request, env) {
+	const expected = String(env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+	if (!expected) return false;
+	return request.headers.get('X-Telegram-Bot-Api-Secret-Token') === expected;
+}
+
+function isAllowedTelegramUser(message, env) {
+	const allowed = String(env.USER_ID || env.TELEGRAM_CHAT_ID || '').trim();
+	if (!allowed) return false;
+	const fromId = String(message?.from?.id || '').trim();
+	const chatId = String(message?.chat?.id || '').trim();
+	return fromId === allowed || chatId === allowed;
+}
+
+function extractFirstUrlFromTelegramMessage(message) {
+	const text = message?.text || message?.caption || '';
+	const entities = [...(message?.entities || []), ...(message?.caption_entities || [])];
+	for (const entity of entities) {
+		if (entity.type === 'url') {
+			const candidate = text.slice(entity.offset, entity.offset + entity.length);
+			if (isValidUrl(candidate)) return candidate;
+		}
+		if (entity.type === 'text_link' && isValidUrl(entity.url)) return entity.url;
+	}
+	const match = text.match(/https?:\/\/[^\s<>()]+/i);
+	if (!match) return '';
+	return match[0].replace(/[\].,!?;:]+$/, '');
+}
+
+async function notifyTelegramWebhookError(chatId, message, env) {
+	try {
+		await sendMessage(escapeHtml(message), chatId, env);
+	} catch (e) {
+		console.error('Telegram webhook error notification failed:', e.message);
+	}
+}
 
 // 检查 URL 是否合法且是 http/https
 function isValidUrl(s) {

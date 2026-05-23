@@ -148,6 +148,12 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 **环境变量**：推荐使用 `IMG_BOT` 负责图片、`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。配置方法参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
+### Telegram Bot 剪藏入口
+
+配置 `CLIP_BOT`、`USER_ID` 和 `TELEGRAM_WEBHOOK_SECRET` 后，可以把网页链接直接发给 `CLIP_BOT`。Telegram 会通过 `/telegram-webhook` 调用 Worker，Worker 校验 webhook secret 和 `USER_ID` 白名单后，复用同一套剪藏流程。
+
+成功剪藏后不额外回复一条“成功”消息，仍沿用上面的 Telegraph/Telegram 正常通知。无链接或剪藏失败时，Bot 会回复一条简短提示。
+
 ## 项目结构
 
 ```text

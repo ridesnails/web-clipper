@@ -245,9 +245,9 @@ npx wrangler secret put IMG_CHAT_ID
 
 > 如果未设置 `IMG_CHAT_ID`，图片链路会 fallback 到旧 `TELEGRAM_CHAT_ID`。
 
-#### 3. CLIP_BOT / USER_ID（剪藏通知）
+#### 3. CLIP_BOT / USER_ID（剪藏通知 + Bot 剪藏入口）
 
-`CLIP_BOT` 是用于发送剪藏完成通知的 Telegram Bot API Token；`USER_ID` 是接收剪藏通知的用户、频道或群组 ID。消息首行会放 Telegraph 裸链接，并同时传 `link_preview_options.url`，用于触发 Telegram 即时预览。
+`CLIP_BOT` 是用于发送剪藏完成通知的 Telegram Bot API Token，也可以作为新的剪藏入口：直接把网页链接发给这个 Bot。`USER_ID` 是接收剪藏通知的用户、频道或群组 ID，同时作为 Bot 剪藏入口的白名单。消息首行会放 Telegraph 裸链接，并同时传 `link_preview_options.url`，用于触发 Telegram 即时预览。
 
 获取方式：
 
@@ -264,6 +264,38 @@ npx wrangler secret put USER_ID
 ```
 
 > 兼容旧配置：如果没有拆分 Bot，也可以只设置 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`，代码会作为 fallback 使用；推荐新部署使用 `IMG_BOT` + `CLIP_BOT` + `USER_ID`。
+
+#### 4. TELEGRAM_WEBHOOK_SECRET（Bot 入口防伪造）
+
+`TELEGRAM_WEBHOOK_SECRET` 用于校验 `/telegram-webhook` 请求确实来自 Telegram。`USER_ID` 负责白名单，`TELEGRAM_WEBHOOK_SECRET` 负责请求来源校验，两者都需要。
+
+生成本地随机值：
+
+```bash
+openssl rand -hex 32
+```
+
+写入本地 `.dev.vars`：
+
+```bash
+TELEGRAM_WEBHOOK_SECRET=<上一步生成的随机值>
+```
+
+写入 Cloudflare Secret：
+
+```bash
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+```
+
+部署 Worker 后，设置 Telegram Webhook：
+
+```bash
+curl "https://api.telegram.org/bot<CLIP_BOT>/setWebhook" \
+  -d "url=https://web-clipper.ridesnail-6a2.workers.dev/telegram-webhook" \
+  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
+```
+
+设置成功后，你给 `CLIP_BOT` 发送一个网页链接即可触发剪藏。成功通知仍走正常 Telegraph/Telegram 通知逻辑；无链接或失败时，Bot 会回复简短提示。
 
 ## 4. 写入代码并安装依赖
 
