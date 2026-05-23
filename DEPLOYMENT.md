@@ -203,6 +203,8 @@ npx wrangler secret put JINA_API_KEY
 
 如需启用 Telegraph 页面生成和 Telegram 推送，需要配置以下 secrets。推荐拆成两个 Bot：`IMG_BOT` 负责 Telegraph 图片中转，`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。
 
+启用后，主流程仍然是 Jina Markdown → FNS 写入 Obsidian。FNS 写入成功后，Worker 会额外重新抓取原网页 HTML，清理脚本和样式，把相对链接转成绝对链接，再转换为 Telegraph Node 创建 Telegraph 页面。如果原网页 HTML 抓取失败，才会降级用 Jina Markdown 正文生成简化 HTML。
+
 #### 1. TELEGRAPH_ACCESS_TOKEN
 
 Telegraph 账号的 access token。
@@ -223,7 +225,7 @@ npx wrangler secret put TELEGRAPH_ACCESS_TOKEN
 
 #### 2. IMG_BOT / IMG_CHAT_ID（图片中转）
 
-`IMG_BOT` 是用于上传文章图片的 Telegram Bot API Token；`IMG_CHAT_ID` 是图片 Bot 所在频道或群组 ID。图片会先上传到 Telegram，再通过 Worker 的 `/image-proxy?file_id=...` 给 Telegraph 引用。
+`IMG_BOT` 是用于上传文章图片的 Telegram Bot API Token；`IMG_CHAT_ID` 是图片 Bot 所在频道或群组 ID。Worker 会优先从原网页 HTML 的 `<img src="...">` 提取图片，先上传到 Telegram，再通过 Worker 的 `/image-proxy?file_id=...` 给 Telegraph 引用。
 
 获取方式：
 
@@ -424,9 +426,9 @@ const path = `${env.CLIP_FOLDER}/${yyyymm}/${slug}.md`;
 
 ### Q: 想剪藏需要登录态的页面
 
-当前架构无法在服务端带登录态抓取（jina 是匿名抓取）。短期解决方案：登录态页面用浏览器装 [SingleFile 扩展](https://github.com/gildas-lormeau/SingleFile) 直接保存为 HTML，不走 Worker。
+当前架构无法在服务端带登录态抓取。FNS 正文使用的 Jina 是匿名抓取；Telegraph 页面使用的原网页 HTML 抓取也是 Worker 端匿名请求。短期解决方案：登录态页面用浏览器装 [SingleFile 扩展](https://github.com/gildas-lormeau/SingleFile) 直接保存为 HTML，不走 Worker。
 
-如果未来扩展功能，可以加一个 `POST /upload-html` 端点接收浏览器扩展上传的完整 HTML，跳过 jina 直接转 Markdown 写 FNS。
+如果未来扩展功能，可以加一个 `POST /upload-html` 端点接收浏览器扩展上传的完整 HTML，跳过服务端匿名抓取：一份转 Markdown 写 FNS，一份清理后转 Telegraph Node。
 
 ## 10. 卸载
 
