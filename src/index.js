@@ -1,5 +1,5 @@
 import { sendPhoto, sendMessage, getFile } from './telegram.js';
-import { createPage, markdownToTelegraphNodes } from './telegraph.js';
+import { createPage, htmlToTelegraphNodes } from './telegraph.js';
 
 // CORS 响应头
 function corsHeaders(env) {
@@ -167,44 +167,49 @@ export default {
 
 			if (env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID)) {
 				try {
-					// 1. 从 cleanBody（Markdown 正文）中提取所有图片 URL
-					const imageUrls = extractImageUrls(cleanBody);
+					// 1. Telegraph 内容优先参考原始网页 HTML，而不是 Jina Markdown。
+					const sourceHtml = await fetchSourceHtml(url);
+					const telegraphHtmlSource = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, url) : markdownBodyToHtml(cleanBody);
 
-					// 2. 下载每张图片并上传到 Telegram 频道，收集 file_id
+					// 2. 从 HTML 中提取图片 URL；HTML 获取失败时降级提取 Markdown 图片。
+					const imageItems = sourceHtml ? extractHtmlImageUrls(sourceHtml, url) : extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
+
+					// 3. 下载每张图片并上传到 Telegram 频道，收集 file_id
 					const imageMappings = [];
-					for (const imgUrl of imageUrls) {
+					for (const imageItem of imageItems) {
 						try {
+							const imgUrl = imageItem.absolute;
 							const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
 							if (imgRes.ok) {
 								const buffer = new Uint8Array(await imgRes.arrayBuffer());
 								const uploadResult = await sendPhoto(buffer, 'image.jpg', env);
-								imageMappings.push({ original: imgUrl, file_id: uploadResult.file_id });
+								imageMappings.push({ raw: imageItem.raw, absolute: imgUrl, file_id: uploadResult.file_id });
 							}
 						} catch (e) {
-							console.error('Image upload failed:', imgUrl, e.message);
+							console.error('Image upload failed:', imageItem.absolute, e.message);
 						}
 					}
 
-					// 3. 替换 cleanBody 中的图片 URL 为 Worker 代理链接，并补充 AI 摘要/标签
-					let telegraphMarkdown = buildTelegraphMarkdown({ body: cleanBody, summary, tags });
+					// 4. 替换图片 URL 为 Worker 代理链接，并补充 AI 摘要/标签
+					let telegraphHtml = buildTelegraphHtml({ body: telegraphHtmlSource, summary, tags });
 					const publicBaseUrl = resolvePublicBaseUrl(request.url, env.PUBLIC_BASE_URL);
 					if (publicBaseUrl) {
 						for (const mapping of imageMappings) {
 							const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}`;
-							telegraphMarkdown = telegraphMarkdown.replaceAll(mapping.original, proxyUrl);
+							telegraphHtml = telegraphHtml.replaceAll(mapping.raw, proxyUrl).replaceAll(mapping.absolute, proxyUrl);
 						}
 					} else if (imageMappings.length > 0) {
 						console.warn('Skip Telegraph image proxy replacement: no public base URL available');
 					}
 
-					// 4. 转换 Markdown 为 Telegraph Node 数组
-					const nodes = markdownToTelegraphNodes(telegraphMarkdown);
+					// 5. 转换 HTML 为 Telegraph Node 数组
+					const nodes = htmlToTelegraphNodes(telegraphHtml);
 
-					// 5. 创建 Telegraph 页面
+					// 6. 创建 Telegraph 页面
 					const pageResult = await createPage(title, nodes, env);
 					telegraphUrl = pageResult.url;
 
-					// 6. 发送 Telegram 消息
+					// 7. 发送 Telegram 消息
 					const hostname = escapeHtml(getHostname(url));
 					const sourceLink = escapeHtmlAttr(url);
 					const summaryBlock = summary ? `\n\n${escapeHtml(summary)}` : '';
@@ -370,17 +375,79 @@ function buildNote({ title, url, date, body, summary, tags = [] }) {
 	return [...frontmatter, '', ...sections].join('\n');
 }
 
-function buildTelegraphMarkdown({ body, summary, tags = [] }) {
-	const sections = [];
+async function fetchSourceHtml(url) {
+	try {
+		const res = await fetch(url, {
+			headers: {
+				Accept: 'text/html,application/xhtml+xml',
+				'User-Agent': 'Mozilla/5.0 (compatible; web-clipper/1.0)',
+			},
+			signal: AbortSignal.timeout(15000),
+		});
+		if (!res.ok) {
+			console.warn('Source HTML fetch failed:', url, res.status);
+			return '';
+		}
+		const contentType = res.headers.get('Content-Type') || '';
+		if (contentType && !contentType.toLowerCase().includes('html')) {
+			console.warn('Source HTML fetch skipped non-HTML response:', url, contentType);
+			return '';
+		}
+		return await res.text();
+	} catch (e) {
+		console.warn('Source HTML fetch failed:', url, e.message);
+		return '';
+	}
+}
+
+function prepareSourceHtmlForTelegraph(html, baseUrl) {
+	return absolutizeHtmlUrls(stripUnsafeHtml(html), baseUrl);
+}
+
+function stripUnsafeHtml(html) {
+	return String(html || '')
+		.replace(/<script\b[\s\S]*?<\/script>/gi, '')
+		.replace(/<style\b[\s\S]*?<\/style>/gi, '')
+		.replace(/<noscript\b[\s\S]*?<\/noscript>/gi, '');
+}
+
+function absolutizeHtmlUrls(html, baseUrl) {
+	return String(html || '').replace(/\b(href|src)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'<>]+))/gi, (match, attr, wrapped, doubleQuoted, singleQuoted, unquoted) => {
+		const raw = doubleQuoted ?? singleQuoted ?? unquoted ?? '';
+		const absolute = resolveUrl(raw, baseUrl);
+		if (!absolute) return match;
+		const quote = wrapped.startsWith("'") ? "'" : '"';
+		return `${attr}=${quote}${escapeHtmlAttr(absolute)}${quote}`;
+	});
+}
+
+function markdownBodyToHtml(markdown) {
+	return String(markdown || '')
+		.split(/\n{2,}/)
+		.map((block) => {
+			const trimmed = block.trim();
+			if (!trimmed) return '';
+			const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+			if (heading) return `<h3>${escapeHtml(heading[2])}</h3>`;
+			const image = trimmed.match(/^!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)$/);
+			if (image) return `<img src="${escapeHtmlAttr(image[1])}">`;
+			return `<p>${escapeHtml(trimmed).replace(/\n/g, '<br>')}</p>`;
+		})
+		.filter(Boolean)
+		.join('\n');
+}
+
+function buildTelegraphHtml({ body, summary, tags = [] }) {
+	const prefix = [];
 	if (summary) {
-		sections.push('## 摘要', '', summary, '');
+		prefix.push(`<h4>摘要</h4>`, `<p>${escapeHtml(summary)}</p>`);
 	}
 	const tagLine = formatTagLine(tags);
 	if (tagLine) {
-		sections.push(`标签：${tagLine}`, '');
+		prefix.push(`<p>标签：${escapeHtml(tagLine)}</p>`);
 	}
-	sections.push(body);
-	return sections.join('\n');
+	if (!prefix.length) return body;
+	return `${prefix.join('\n')}\n${body || ''}`;
 }
 
 function getHostname(url) {
@@ -420,6 +487,31 @@ function extractImageUrls(md) {
 		urls.push(match[1]);
 	}
 	return [...new Set(urls)]; // 去重
+}
+
+function extractHtmlImageUrls(html, baseUrl) {
+	const images = [];
+	const seen = new Set();
+	const regex = /<img\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'<>]+))/gi;
+	let match;
+	while ((match = regex.exec(html)) !== null) {
+		const raw = match[1] || match[2] || match[3] || '';
+		const absolute = resolveUrl(raw, baseUrl);
+		if (!absolute || seen.has(absolute)) continue;
+		seen.add(absolute);
+		images.push({ raw, absolute });
+	}
+	return images;
+}
+
+function resolveUrl(value, baseUrl) {
+	try {
+		const url = new URL(String(value || '').trim(), baseUrl);
+		if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+		return url.href;
+	} catch {
+		return '';
+	}
 }
 
 function stripLeadingDuplicateTitle(body, title) {
@@ -507,8 +599,11 @@ export {
 	buildNote,
 	stripEmptyLinks,
 	extractImageUrls,
+	extractHtmlImageUrls,
 	escapeHtml,
-	buildTelegraphMarkdown,
+	buildTelegraphHtml,
+	prepareSourceHtmlForTelegraph,
+	markdownBodyToHtml,
 };
 
 // 过滤掉 Markdown 中空文本的链接（Jina 提取的 heading anchor links）

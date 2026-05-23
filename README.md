@@ -131,7 +131,7 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、剪藏通知 Bot（`CLIP_BOT` + `USER_ID`，兼容旧 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`）时，FNS 写入成功后 Worker 会自动：
 
-1. 将 Markdown 正文转换为 Telegraph Node 格式
+1. 重新抓取原网页 HTML，清理并转换为 Telegraph Node 格式
 2. 调用 Telegraph `createPage` 创建可阅读的在线页面
 3. 通过剪藏通知 Bot 发送消息到指定用户/频道/群组，消息包含：
    - Telegraph 链接（放在首行，并通过 `link_preview_options.url` 强制即时预览）
@@ -140,7 +140,9 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
    - 原文链接
    - AI 标签（如果已生成）
 
-**图片处理**：Telegraph 原生图片上传已废弃。Worker 会将文章中的图片通过图片 Bot（优先 `IMG_BOT`，兼容旧 `TELEGRAM_BOT_TOKEN`；聊天目标优先 `IMG_CHAT_ID`，兼容旧 `TELEGRAM_CHAT_ID`）上传到 Telegram 频道获取 `file_id`，再通过 `/image-proxy?file_id=xxx` 路由代理访问。Telegram 频道相当于免费图床。
+**图片处理**：Telegraph 原生图片上传已废弃。Worker 会优先从原网页 HTML 的 `<img src="...">` 提取图片，通过图片 Bot（优先 `IMG_BOT`，兼容旧 `TELEGRAM_BOT_TOKEN`；聊天目标优先 `IMG_CHAT_ID`，兼容旧 `TELEGRAM_CHAT_ID`）上传到 Telegram 频道获取 `file_id`，再通过 `/image-proxy?file_id=xxx` 路由代理访问。Telegram 频道相当于免费图床。
+
+**降级行为**：如果原网页 HTML 抓取失败，Worker 才会用 Jina Markdown 正文生成简化 HTML，再转换为 Telegraph Node。FNS 笔记仍使用 Jina Markdown，不受 Telegraph HTML 链路影响。
 
 **失败不影响主流程**：如果 Telegraph 创建页面或 Telegram 发送消息失败，Worker 仍然会返回 FNS 写入成功的结果（`ok: true`），只是响应中不包含 `telegraphUrl` 和 `telegramMessageId`。FNS 写入始终优先，Telegraph/Telegram 推送是附加的"锦上添花"。
 
@@ -151,7 +153,7 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 ```text
 src/
 ├── index.js      # Worker 入口：鉴权、抓取、摘要、FNS 写入、推送编排
-├── telegraph.js  # Markdown/HTML -> Telegraph Node 转换 + createPage API 封装
+├── telegraph.js  # HTML/Markdown -> Telegraph Node 转换 + createPage API 封装
 └── telegram.js   # Telegram sendPhoto / sendMessage / getFile API 封装
 ```
 

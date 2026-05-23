@@ -402,6 +402,18 @@ describe('Telegraph + Telegram integration', () => {
 	};
 
 	it('POST / with Telegraph config - success returns telegraphUrl and telegramMessageId', async () => {
+		const sourceHtml = `<!doctype html>
+<html>
+	<head><script>ignored()</script><style>.x{color:red}</style></head>
+	<body>
+		<article>
+			<h2>HTML Source Heading</h2>
+			<p>HTML-only body used by Telegraph.</p>
+			<a href="/relative/path">relative link</a>
+		</article>
+	</body>
+</html>`;
+
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
 			.mockResolvedValueOnce(
@@ -419,6 +431,7 @@ describe('Telegraph + Telegram integration', () => {
 				),
 			)
 			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }))
 			.mockResolvedValueOnce(
 				new Response(
 					JSON.stringify({
@@ -442,12 +455,19 @@ describe('Telegraph + Telegram integration', () => {
 		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
 		expect(json.telegramMessageId).toBe(99);
 
-		expect(fetchMock).toHaveBeenCalledTimes(5);
-		expect(fetchMock.mock.calls[3][0]).toBe('https://api.telegra.ph/createPage');
-		const telegraphPayload = JSON.parse(fetchMock.mock.calls[3][1].body);
+		expect(fetchMock).toHaveBeenCalledTimes(6);
+		expect(fetchMock.mock.calls[3][0]).toBe('https://example.com/article');
+		expect(fetchMock.mock.calls[4][0]).toBe('https://api.telegra.ph/createPage');
+		const telegraphPayload = JSON.parse(fetchMock.mock.calls[4][1].body);
 		expect(telegraphPayload.title).toBe('Test Article');
-		expect(fetchMock.mock.calls[4][0]).toBe(`https://api.telegram.org/bot${telegraphAiEnv.CLIP_BOT}/sendMessage`);
-		const telegramPayload = JSON.parse(fetchMock.mock.calls[4][1].body);
+		const telegraphNodes = JSON.parse(telegraphPayload.content);
+		const serializedNodes = JSON.stringify(telegraphNodes);
+		expect(serializedNodes).toContain('HTML-only body used by Telegraph.');
+		expect(serializedNodes).toContain('https://example.com/relative/path');
+		expect(serializedNodes).not.toContain('This is the body content.');
+		expect(serializedNodes).not.toContain('ignored()');
+		expect(fetchMock.mock.calls[5][0]).toBe(`https://api.telegram.org/bot${telegraphAiEnv.CLIP_BOT}/sendMessage`);
+		const telegramPayload = JSON.parse(fetchMock.mock.calls[5][1].body);
 		expect(telegramPayload.chat_id).toBe(telegraphAiEnv.USER_ID);
 		const sentText = telegramPayload.text;
 		expect(sentText.startsWith('https://telegra.ph/Test-05-21\n\n')).toBe(true);
@@ -466,7 +486,7 @@ describe('Telegraph + Telegram integration', () => {
 		expect(fnsPayload.content).toContain('> [!info] 📌 信息');
 	});
 
-	it('POST / with localhost request origin rewrites Telegraph images to PUBLIC_BASE_URL', async () => {
+	it('POST / with localhost request origin rewrites Telegraph HTML images to PUBLIC_BASE_URL', async () => {
 		const markdownWithImage = `Title: Test Article
 URL Source: https://example.com/article
 Published Time: 2024-01-01
@@ -477,10 +497,12 @@ Markdown Content:
 ![cover](https://img.example.com/cover.jpg)
 
 Body.`;
+		const sourceHtml = '<article><h1>HTML Article</h1><img src="/cover.jpg"><p>Body.</p></article>';
 
 		fetchMock
 			.mockResolvedValueOnce(new Response(markdownWithImage, { status: 200 }))
 			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }))
 			.mockResolvedValueOnce(
 				new Response(new Uint8Array([1, 2, 3]), {
 					status: 200,
@@ -521,12 +543,15 @@ Body.`;
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
-		expect(fetchMock.mock.calls[3][0]).toBe(`https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`);
-		expect(fetchMock.mock.calls[4][0]).toBe('https://api.telegra.ph/createPage');
-		const telegraphPayload = JSON.parse(fetchMock.mock.calls[4][1].body);
+		expect(fetchMock.mock.calls[2][0]).toBe('https://example.com/article');
+		expect(fetchMock.mock.calls[3][0]).toBe('https://example.com/cover.jpg');
+		expect(fetchMock.mock.calls[4][0]).toBe(`https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`);
+		expect(fetchMock.mock.calls[5][0]).toBe('https://api.telegra.ph/createPage');
+		const telegraphPayload = JSON.parse(fetchMock.mock.calls[5][1].body);
 		const telegraphNodes = JSON.parse(telegraphPayload.content);
 		const serializedNodes = JSON.stringify(telegraphNodes);
 		expect(serializedNodes).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1`);
+		expect(serializedNodes).not.toContain('https://example.com/cover.jpg');
 		expect(serializedNodes).not.toContain('127.0.0.1:8787/image-proxy');
 	});
 
@@ -534,6 +559,7 @@ Body.`;
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
 			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
+			.mockResolvedValueOnce(new Response('<article><p>HTML body</p></article>', { status: 200, headers: { 'Content-Type': 'text/html' } }))
 			.mockRejectedValueOnce(new Error('Telegraph API error'));
 
 		const request = createRequest({ url: 'https://example.com/article' });
