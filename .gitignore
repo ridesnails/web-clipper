@@ -169,3 +169,10 @@ dist
 
 .dev.vars
 .ace-tool/
+
+# local clipper debug artifacts
+.wrangler-build-explicit/
+plan_clip_ai_telegram_title/
+temp-real-clip-test.mjs
+temp-run-real-worker.sh
+tmp/
