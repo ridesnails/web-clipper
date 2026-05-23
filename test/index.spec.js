@@ -1,25 +1,5 @@
-import { env, createExecutionContext, waitOnExecutionContext, SELF } from 'cloudflare:test';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker, { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks } from '../src';
-import { getFile } from '../src/telegram.js';
-
-// 预 mock Telegraph/Telegram 模块，供后续集成测试使用
-vi.mock('../src/telegraph.js', async () => {
-	const actual = await vi.importActual('../src/telegraph.js');
-	return {
-		...actual,
-		createPage: vi.fn(),
-	};
-});
-vi.mock('../src/telegram.js', async () => {
-	const actual = await vi.importActual('../src/telegram.js');
-	return {
-		...actual,
-		sendMessage: vi.fn(),
-		sendPhoto: vi.fn(),
-		getFile: vi.fn(),
-	};
-});
 
 const mockEnv = {
 	API_KEY: 'test-api-key',
@@ -52,6 +32,15 @@ This is the body content.`;
 
 let originalFetch;
 let fetchMock;
+
+function createExecutionContext() {
+	return {
+		waitUntil: vi.fn(),
+		passThroughOnException: vi.fn(),
+	};
+}
+
+async function waitOnExecutionContext() {}
 
 beforeEach(() => {
 	originalFetch = globalThis.fetch;
@@ -360,17 +349,24 @@ describe('Integration with mocked fetch', () => {
 	});
 
 	it('Mock Jina failure (non-200) - verify 502', async () => {
+		vi.useFakeTimers();
 		fetchMock
 			.mockResolvedValueOnce(new Response('Jina error', { status: 500 }))
 			.mockResolvedValueOnce(new Response('Jina error', { status: 500 }))
 			.mockResolvedValueOnce(new Response('Jina error', { status: 500 }));
 
-		const request = createRequest({ url: 'https://example.com/article' });
-		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, mockEnv, ctx);
-		await waitOnExecutionContext(ctx);
+		try {
+			const request = createRequest({ url: 'https://example.com/article' });
+			const ctx = createExecutionContext();
+			const responsePromise = worker.fetch(request, mockEnv, ctx);
+			await vi.runAllTimersAsync();
+			const response = await responsePromise;
+			await waitOnExecutionContext(ctx);
 
-		expect(response.status).toBe(502);
+			expect(response.status).toBe(502);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('Mock Jina success - mock FNS failure - verify 502', async () => {
@@ -386,8 +382,8 @@ describe('Integration with mocked fetch', () => {
 		expect(response.status).toBe(502);
 	});
 
-	it('integration style with SELF.fetch', async () => {
-		const response = await SELF.fetch('http://example.com', { method: 'GET' });
+	it('direct handler invocation returns 405 for GET', async () => {
+		const response = await worker.fetch(new Request('http://example.com', { method: 'GET' }), mockEnv, createExecutionContext());
 		expect(response.status).toBe(405);
 		expect(await response.json()).toEqual({ error: 'Method not allowed. Use POST.' });
 	});
@@ -406,11 +402,6 @@ describe('Telegraph + Telegram integration', () => {
 	};
 
 	it('POST / with Telegraph config - success returns telegraphUrl and telegramMessageId', async () => {
-		const { createPage } = await import('../src/telegraph.js');
-		const { sendMessage } = await import('../src/telegram.js');
-		createPage.mockResolvedValueOnce({ url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' });
-		sendMessage.mockResolvedValueOnce({ message_id: 99 });
-
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
 			.mockResolvedValueOnce(
@@ -427,7 +418,17 @@ describe('Telegraph + Telegram integration', () => {
 					{ status: 200 },
 				),
 			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), { status: 200 }));
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const telegraphAiEnv = { ...telegraphEnv, AI_API_KEY: 'test-ai-key' };
@@ -441,15 +442,23 @@ describe('Telegraph + Telegram integration', () => {
 		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
 		expect(json.telegramMessageId).toBe(99);
 
-		expect(sendMessage).toHaveBeenCalledTimes(1);
-		expect(sendMessage.mock.calls[0][1]).toBe(telegraphAiEnv.USER_ID);
-		expect(sendMessage.mock.calls[0][2].CLIP_BOT).toBe(telegraphAiEnv.CLIP_BOT);
-		const sentText = sendMessage.mock.calls[0][0];
+		expect(fetchMock).toHaveBeenCalledTimes(5);
+		expect(fetchMock.mock.calls[3][0]).toBe('https://api.telegra.ph/createPage');
+		const telegraphPayload = JSON.parse(fetchMock.mock.calls[3][1].body);
+		expect(telegraphPayload.title).toBe('Test Article');
+		expect(fetchMock.mock.calls[4][0]).toBe(`https://api.telegram.org/bot${telegraphAiEnv.CLIP_BOT}/sendMessage`);
+		const telegramPayload = JSON.parse(fetchMock.mock.calls[4][1].body);
+		expect(telegramPayload.chat_id).toBe(telegraphAiEnv.USER_ID);
+		const sentText = telegramPayload.text;
 		expect(sentText.startsWith('https://telegra.ph/Test-05-21\n\n')).toBe(true);
 		expect(sentText).toContain('一段摘要');
 		expect(sentText).toContain('#云服务 #Docker_Deploy');
 		expect(sentText).toContain('example.com');
-		expect(sendMessage.mock.calls[0][3]).toEqual({ linkPreviewUrl: 'https://telegra.ph/Test-05-21' });
+		expect(telegramPayload.link_preview_options).toEqual({
+			is_disabled: false,
+			url: 'https://telegra.ph/Test-05-21',
+			prefer_large_media: true,
+		});
 
 		const fnsPayload = JSON.parse(fetchMock.mock.calls[2][1].body);
 		expect(fnsPayload.content).toContain('> [!abstract] ✨ 摘要');
@@ -458,12 +467,6 @@ describe('Telegraph + Telegram integration', () => {
 	});
 
 	it('POST / with localhost request origin rewrites Telegraph images to PUBLIC_BASE_URL', async () => {
-		const { createPage } = await import('../src/telegraph.js');
-		const { sendPhoto, sendMessage } = await import('../src/telegram.js');
-		createPage.mockResolvedValueOnce({ url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' });
-		sendPhoto.mockResolvedValueOnce({ file_id: 'photo-file-1' });
-		sendMessage.mockResolvedValueOnce({ message_id: 100 });
-
 		const markdownWithImage = `Title: Test Article
 URL Source: https://example.com/article
 Published Time: 2024-01-01
@@ -484,6 +487,29 @@ Body.`;
 					headers: { 'Content-Type': 'image/jpeg' },
 				}),
 			);
+		fetchMock
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: {
+							message_id: 77,
+							photo: [{ file_id: 'photo-file-1', file_unique_id: 'uniq-1', width: 800 }],
+						},
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 100 } }), { status: 200 }));
 
 		const request = new Request('http://127.0.0.1:8787', {
 			method: 'POST',
@@ -495,20 +521,20 @@ Body.`;
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
-		expect(sendPhoto).toHaveBeenCalledTimes(1);
-		const telegraphNodes = createPage.mock.calls[0][1];
+		expect(fetchMock.mock.calls[3][0]).toBe(`https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`);
+		expect(fetchMock.mock.calls[4][0]).toBe('https://api.telegra.ph/createPage');
+		const telegraphPayload = JSON.parse(fetchMock.mock.calls[4][1].body);
+		const telegraphNodes = JSON.parse(telegraphPayload.content);
 		const serializedNodes = JSON.stringify(telegraphNodes);
 		expect(serializedNodes).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1`);
 		expect(serializedNodes).not.toContain('127.0.0.1:8787/image-proxy');
 	});
 
 	it('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
-		const { createPage } = await import('../src/telegraph.js');
-		createPage.mockRejectedValueOnce(new Error('Telegraph API error'));
-
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
+			.mockRejectedValueOnce(new Error('Telegraph API error'));
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -525,18 +551,24 @@ Body.`;
 // 7. Image proxy 路由测试
 describe('Image proxy route', () => {
 	it('GET /image-proxy?file_id=xxx - success returns image with correct headers', async () => {
-		const { getFile } = await import('../src/telegram.js');
-		getFile.mockResolvedValueOnce({
-			file_path: 'photos/file_1.jpg',
-			file_url: 'https://api.telegram.org/file/bot123/photos/file_1.jpg',
-		});
-
-		fetchMock.mockResolvedValueOnce(
-			new Response(new Uint8Array([1, 2, 3]), {
-				status: 200,
-				headers: { 'Content-Type': 'image/jpeg' },
-			}),
-		);
+		fetchMock
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: {
+							file_path: 'photos/file_1.jpg',
+						},
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(
+				new Response(new Uint8Array([1, 2, 3]), {
+					status: 200,
+					headers: { 'Content-Type': 'image/jpeg' },
+				}),
+			);
 
 		const request = new Request('http://example.com/image-proxy?file_id=abc123');
 		const ctx = createExecutionContext();
@@ -559,8 +591,15 @@ describe('Image proxy route', () => {
 	});
 
 	it('GET /image-proxy?file_id=invalid - getFile fails returns 502', async () => {
-		const { getFile } = await import('../src/telegram.js');
-		getFile.mockRejectedValueOnce(new Error('invalid file_id'));
+		fetchMock.mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({
+					ok: false,
+					description: 'invalid file_id',
+				}),
+				{ status: 200 },
+			),
+		);
 
 		const request = new Request('http://example.com/image-proxy?file_id=invalid');
 		const ctx = createExecutionContext();

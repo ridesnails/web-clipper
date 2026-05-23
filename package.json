@@ -1,6 +1,6 @@
 {
   "name": "web-clipper",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "scripts": {
     "deploy": "wrangler deploy",
@@ -9,7 +9,6 @@
     "test": "vitest"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.4",
     "vitest": "~3.2.0",
     "wrangler": "^4.91.0"
   }

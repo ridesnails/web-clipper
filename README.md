@@ -6,7 +6,7 @@
 
 ## 特性
 
-- 🪶 **轻量** —— 单文件 Worker，约 150 行 JavaScript，无队列、无数据库、无依赖服务
+- 🪶 **轻量** —— 3 个核心源码模块（入口 + Telegraph + Telegram），无队列、无数据库、无依赖服务
 - 🆓 **零成本** —— 完全跑在 Cloudflare Workers / Jina Reader / FNS 的免费层
 - 🌐 **多入口** —— iOS Shortcut、浏览器 Bookmarklet、curl、任何能发 HTTP 请求的客户端
 - 📝 **真·主存储** —— 笔记直接进 FNS，通过 Obsidian 实时同步到所有设备
@@ -48,11 +48,24 @@
 
 ```markdown
 ---
-title: '服务器与网站的开荒入坑'
+title: "服务器与网站的开荒入坑"
 url: https://blog.huan666.de/posts/server-website-getting-started
 date: 2026-05-14T15:18:39.538Z
 source: clipper
+summary: "一段可选 AI 摘要"
 ---
+
+# 服务器与网站的开荒入坑
+
+> [!abstract] ✨ 摘要
+> 一段可选 AI 摘要
+
+> [!info] 📌 信息
+> - **来源**：[blog.huan666.de](https://blog.huan666.de/posts/server-website-getting-started)
+> - **时间**：2026-05-14T15:18:39.538Z
+> - **链接**：[原文链接](https://blog.huan666.de/posts/server-website-getting-started)
+
+## 📄 正文
 
 （jina 抽取出的正文 markdown，元信息头已剥离）
 ```
@@ -105,7 +118,7 @@ source: clipper
 所有响应均包含 CORS 头，支持浏览器 Bookmarklet 直接调用：
 
 - `Access-Control-Allow-Origin: *`
-- `Access-Control-Allow-Methods: GET, POST, OPTIONS`
+- `Access-Control-Allow-Methods: POST, OPTIONS`
 - `Access-Control-Allow-Headers: Authorization, Content-Type`
 
 Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
@@ -132,6 +145,15 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 **失败不影响主流程**：如果 Telegraph 创建页面或 Telegram 发送消息失败，Worker 仍然会返回 FNS 写入成功的结果（`ok: true`），只是响应中不包含 `telegraphUrl` 和 `telegramMessageId`。FNS 写入始终优先，Telegraph/Telegram 推送是附加的"锦上添花"。
 
 **环境变量**：推荐使用 `IMG_BOT` 负责图片、`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。配置方法参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+
+## 项目结构
+
+```text
+src/
+├── index.js      # Worker 入口：鉴权、抓取、摘要、FNS 写入、推送编排
+├── telegraph.js  # Markdown/HTML -> Telegraph Node 转换 + createPage API 封装
+└── telegram.js   # Telegram sendPhoto / sendMessage / getFile API 封装
+```
 
 ## 客户端接入示例
 

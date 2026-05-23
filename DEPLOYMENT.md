@@ -141,7 +141,8 @@ USER_ID=<剪藏通知接收者ID>
 - `FNS_BASE` **不带末尾斜杠**，**不带 `/api`**
 - `FNS_VAULT` 是 FNS/Obsidian 中的 Vault/仓库名
 - `CLIP_FOLDER` 是剪藏落盘目录，例如 `Clippings`
-- 如果启用 Telegraph 图片代理，`PUBLIC_BASE_URL` 必须填写外网可访问的 Worker 地址，**不要**填 `localhost`、`127.0.0.1` 或局域网地址，且**不带末尾斜杠**
+- `PUBLIC_BASE_URL` 只在启用 Telegraph 图片代理时需要；本地先不填也能跑通主链路，等第 6 步拿到公网 Worker 地址后再补上
+- 如果填写 `PUBLIC_BASE_URL`，必须是外网可访问的 Worker 地址，**不要**填 `localhost`、`127.0.0.1` 或局域网地址，且**不带末尾斜杠**
 
 ### 3.2 把 `.dev.vars` 加入 `.gitignore`
 
@@ -262,11 +263,29 @@ npx wrangler secret put USER_ID
 
 > 兼容旧配置：如果没有拆分 Bot，也可以只设置 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`，代码会作为 fallback 使用；推荐新部署使用 `IMG_BOT` + `CLIP_BOT` + `USER_ID`。
 
-## 4. 写入主代码
+## 4. 写入代码并安装依赖
 
-把仓库里的 `src/index.js`（或参考 [README 上面那段完整代码](./src/index.js)）整体内容确认存在并保存。
+如果你是直接 clone 这个仓库，确认以下文件存在即可：
 
-> 如果你是**从 0 开始而不是 clone 这个仓库**，需要把 `src/index.js` 的完整内容从项目仓库中复制过来。
+- `src/index.js`
+- `src/telegraph.js`
+- `src/telegram.js`
+- `package.json`
+- `wrangler.jsonc`
+
+如果你是**从 0 开始而不是 clone 这个仓库**，不要只复制 `src/index.js`。至少要把上面 5 个文件按仓库当前版本一起对齐，否则 Telegraph / Telegram 相关逻辑和脚本依赖会缺失。
+
+然后安装依赖：
+
+```bash
+npm install
+```
+
+可选但推荐先跑一遍测试：
+
+```bash
+npm test -- --run
+```
 
 ## 5. 本地验证
 
@@ -288,10 +307,10 @@ curl -X POST http://localhost:8787 \
 预期返回：
 
 ```json
-{ "ok": true, "title": "Example Domain", "path": "Clippings/2026-05/Example-Domain.md" }
+{ "ok": true, "title": "Example Domain", "path": "Clippings/2026-05/20260522T172855Z-Example-Domain.md" }
 ```
 
-打开 Obsidian → 你的 Vault → `Clippings/2026-05/` 应该出现 `Example-Domain.md`，内容带完整 frontmatter。
+打开 Obsidian → 你的 Vault → `Clippings/2026-05/` 应该出现一篇带时间戳前缀的 `Example-Domain.md` 笔记，内容带完整 frontmatter。
 
 ✅ **检查点**：Obsidian 里出现这个文件 → 核心功能跑通了。
 
@@ -319,6 +338,11 @@ curl -X POST https://web-clipper.<your>.workers.dev \
 ```
 
 成功 → 部署完成。
+
+如果你要启用 Telegraph 图片代理，这时把部署后拿到的公网地址回填到：
+
+- 本地 `.dev.vars` 里的 `PUBLIC_BASE_URL`
+- Cloudflare secret `PUBLIC_BASE_URL`
 
 ## 7. 配置客户端入口
 
