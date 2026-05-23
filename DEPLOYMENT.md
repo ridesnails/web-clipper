@@ -209,7 +209,12 @@ npx wrangler secret put JINA_API_KEY
 
 如需启用 Telegraph 页面生成和 Telegram 推送，需要配置以下 secrets。推荐拆成两个 Bot：`IMG_BOT` 负责 Telegraph 图片中转，`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。
 
-启用后，主流程仍然是 Jina Markdown → FNS 写入 Obsidian。FNS 写入成功后，Worker 会额外重新抓取原网页 HTML，清理脚本和样式，把相对链接转成绝对链接，再转换为 Telegraph Node 创建 Telegraph 页面。如果原网页 HTML 抓取失败，才会降级用 Jina Markdown 正文生成简化 HTML。
+启用后，主流程仍然是 Jina Markdown → 生成笔记内容。然后 Worker 会把两条链路并行执行：
+
+- FNS：写入 Obsidian
+- Telegraph / Telegram：生成 Telegraph 页面并发送通知
+
+两条链路互不依赖。如果原网页 HTML 抓取失败，Telegraph 链路会降级使用 Jina Markdown 正文生成简化 HTML。
 
 ##### 1. TELEGRAPH_ACCESS_TOKEN
 

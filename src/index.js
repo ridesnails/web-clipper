@@ -147,111 +147,134 @@ const worker = {
 			tags,
 		});
 
-		// —— 第五关：写入 FNS ——
-		try {
-			const fnsRes = await fetch(`${env.FNS_BASE}/api/note`, {
-				method: 'POST',
-				headers: {
-					Authorization: `Bearer ${env.FNS_TOKEN}`,
-					'Content-Type': 'application/json',
-				},
-				body: JSON.stringify({
-					vault: env.FNS_VAULT,
-					path: path,
-					content: content,
-				}),
-			});
-			const fnsData = await fnsRes.json();
-			if (!fnsData.status) {
-				console.error('FNS write failed:', path, JSON.stringify(fnsData));
-				return Response.json({ error: `FNS write failed: ${JSON.stringify(fnsData)}` }, { status: 502, headers: corsHeaders(env) });
+		const telegraphEnabled = Boolean(env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID));
+		const [fnsResult, telegraphResult] = await Promise.allSettled([
+			writeToFns({ path, content, env }),
+			telegraphEnabled ? pushTelegraphAndTelegram({ requestUrl: request.url, articleUrl: url, title, cleanBody, summary, tags, env }) : Promise.resolve(null),
+		]);
+
+		const fnsOk = fnsResult.status === 'fulfilled';
+		const telegraphOk = telegraphEnabled ? telegraphResult.status === 'fulfilled' : false;
+		const telegraphData = telegraphEnabled && telegraphResult.status === 'fulfilled' ? telegraphResult.value : {};
+
+		if (!fnsOk && (!telegraphEnabled || !telegraphOk)) {
+			const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
+			if (!telegraphEnabled) {
+				return Response.json({ error: `FNS failed: ${fnsError}` }, { status: 502, headers: corsHeaders(env) });
 			}
-			// 在 FNS 成功之后，尝试 Telegraph + Telegram 推送
-			let telegraphUrl = null;
-			let telegramMessageId = null;
-
-			if (env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID)) {
-				try {
-					// 1. Telegraph 内容优先参考原始网页 HTML，而不是 Jina Markdown。
-					const sourceHtml = await fetchSourceHtml(url);
-					const telegraphHtmlSource = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, url) : markdownBodyToHtml(cleanBody);
-
-					// 2. 从 HTML 中提取图片 URL；HTML 获取失败时降级提取 Markdown 图片。
-					const imageItems = sourceHtml ? extractHtmlImageUrls(sourceHtml, url) : extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
-
-					// 3. 下载每张图片并上传到 Telegram 频道，收集 file_id
-					const imageMappings = [];
-					for (const imageItem of imageItems) {
-						try {
-							const imgUrl = imageItem.absolute;
-							const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
-							if (imgRes.ok) {
-								const buffer = new Uint8Array(await imgRes.arrayBuffer());
-								const uploadResult = await sendPhoto(buffer, 'image.jpg', env);
-								imageMappings.push({ raw: imageItem.raw, absolute: imgUrl, file_id: uploadResult.file_id });
-							}
-						} catch (e) {
-							console.error('Image upload failed:', imageItem.absolute, e.message);
-						}
-					}
-
-					// 4. 替换图片 URL 为 Worker 代理链接，并补充 AI 摘要/标签
-					let telegraphHtml = buildTelegraphHtml({ body: telegraphHtmlSource, summary, tags });
-					const publicBaseUrl = resolvePublicBaseUrl(request.url, env.PUBLIC_BASE_URL);
-					if (publicBaseUrl) {
-						for (const mapping of imageMappings) {
-							const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}`;
-							telegraphHtml = telegraphHtml.replaceAll(mapping.raw, proxyUrl).replaceAll(mapping.absolute, proxyUrl);
-						}
-					} else if (imageMappings.length > 0) {
-						console.warn('Skip Telegraph image proxy replacement: no public base URL available');
-					}
-
-					// 5. 转换 HTML 为 Telegraph Node 数组
-					const nodes = htmlToTelegraphNodes(telegraphHtml);
-
-					// 6. 创建 Telegraph 页面
-					const pageResult = await createPage(title, nodes, env);
-					telegraphUrl = pageResult.url;
-
-					// 7. 发送 Telegram 消息
-					const hostname = escapeHtml(getHostname(url));
-					const sourceLink = escapeHtmlAttr(url);
-					const summaryBlock = summary ? `\n\n${escapeHtml(summary)}` : '';
-					const tagLine = formatTagLine(tags);
-					const tagBlock = tagLine ? `\n\n${escapeHtml(tagLine)}` : '';
-					const msgText = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(title)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}\n\n#webclipper`;
-					const msgResult = await sendMessage(msgText, env.USER_ID || env.TELEGRAM_CHAT_ID, env, { linkPreviewUrl: telegraphUrl });
-					telegramMessageId = msgResult.message_id;
-
-					console.log('Telegraph/Telegram pushed:', telegraphUrl, telegramMessageId);
-				} catch (e) {
-					console.error('Telegraph/Telegram push failed:', e.message);
-					// 推送失败不影响主流程
-				}
-			}
-
-			console.log('Clipped:', title, '->', path);
-			return Response.json(
-				{
-					ok: true,
-					title: title,
-					path: path,
-					telegraphUrl: telegraphUrl || undefined,
-					telegramMessageId: telegramMessageId || undefined,
-				},
-				{ headers: corsHeaders(env) },
-			);
-		} catch (e) {
-			console.error('FNS write failed:', path, e.message);
-			return Response.json({ error: `FNS error: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
+			const telegraphError =
+				telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
+			return Response.json({ error: `FNS failed: ${fnsError}; Telegraph failed: ${telegraphError}` }, { status: 502, headers: corsHeaders(env) });
 		}
+
+		if (!fnsOk) {
+			const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
+			console.error('FNS write failed:', path, fnsError);
+		}
+
+		if (telegraphEnabled && !telegraphOk) {
+			const telegraphError =
+				telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
+			console.error('Telegraph/Telegram push failed:', telegraphError);
+		}
+
+		console.log('Clipped:', title, '->', path);
+		return Response.json(
+			{
+				ok: true,
+				title,
+				fnsOk,
+				path: fnsOk ? path : undefined,
+				telegraphOk,
+				telegraphUrl: telegraphData.telegraphUrl || undefined,
+				telegramMessageId: telegraphData.telegramMessageId || undefined,
+			},
+			{ headers: corsHeaders(env) },
+		);
 	},
 };
 
 export default worker;
 
 // —— 工具函数 ——
+
+async function writeToFns({ path, content, env }) {
+	const fnsRes = await fetch(`${env.FNS_BASE}/api/note`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${env.FNS_TOKEN}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			vault: env.FNS_VAULT,
+			path,
+			content,
+		}),
+	});
+
+	const fnsData = await fnsRes.json();
+	if (!fnsData.status) {
+		throw new Error(JSON.stringify(fnsData));
+	}
+	return { path };
+}
+
+async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, summary, tags, env }) {
+	// Telegraph 内容优先参考原始网页 HTML，而不是 Jina Markdown。
+	const sourceHtml = await fetchSourceHtml(articleUrl);
+	const telegraphHtmlSource = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, articleUrl) : markdownBodyToHtml(cleanBody);
+
+	// 从 HTML 中提取图片 URL；HTML 获取失败时降级提取 Markdown 图片。
+	const imageItems = sourceHtml ? extractHtmlImageUrls(sourceHtml, articleUrl) : extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
+
+	// 下载每张图片并上传到 Telegram 频道，收集 file_id
+	const imageMappings = [];
+	for (const imageItem of imageItems) {
+		try {
+			const imgUrl = imageItem.absolute;
+			const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
+			if (imgRes.ok) {
+				const buffer = new Uint8Array(await imgRes.arrayBuffer());
+				const uploadResult = await sendPhoto(buffer, 'image.jpg', env);
+				imageMappings.push({ raw: imageItem.raw, absolute: imgUrl, file_id: uploadResult.file_id });
+			}
+		} catch (e) {
+			console.error('Image upload failed:', imageItem.absolute, e.message);
+		}
+	}
+
+	// 替换图片 URL 为 Worker 代理链接，并补充 AI 摘要/标签
+	let telegraphHtml = buildTelegraphHtml({ body: telegraphHtmlSource, summary, tags });
+	const publicBaseUrl = resolvePublicBaseUrl(requestUrl, env.PUBLIC_BASE_URL);
+	if (publicBaseUrl) {
+		for (const mapping of imageMappings) {
+			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}`;
+			telegraphHtml = telegraphHtml.replaceAll(mapping.raw, proxyUrl).replaceAll(mapping.absolute, proxyUrl);
+		}
+	} else if (imageMappings.length > 0) {
+		console.warn('Skip Telegraph image proxy replacement: no public base URL available');
+	}
+
+	// 转换 HTML 为 Telegraph Node 数组
+	const nodes = htmlToTelegraphNodes(telegraphHtml);
+
+	// 创建 Telegraph 页面
+	const pageResult = await createPage(title, nodes, env);
+	const telegraphUrl = pageResult.url;
+
+	// 发送 Telegram 消息
+	const hostname = escapeHtml(getHostname(articleUrl));
+	const sourceLink = escapeHtmlAttr(articleUrl);
+	const summaryBlock = summary ? `\n\n${escapeHtml(summary)}` : '';
+	const tagLine = formatTagLine(tags);
+	const tagBlock = tagLine ? `\n\n${escapeHtml(tagLine)}` : '';
+	const msgText = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(title)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}\n\n#webclipper`;
+	const msgResult = await sendMessage(msgText, env.USER_ID || env.TELEGRAM_CHAT_ID, env, { linkPreviewUrl: telegraphUrl });
+	const telegramMessageId = msgResult.message_id;
+
+	console.log('Telegraph/Telegram pushed:', telegraphUrl, telegramMessageId);
+	return { telegraphUrl, telegramMessageId };
+}
 
 async function handleTelegramWebhook(request, env) {
 	if (request.method !== 'POST') {

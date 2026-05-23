@@ -83,13 +83,18 @@
 {
 	"ok": true,
 	"title": "Article Title",
+	"fnsOk": true,
 	"path": "Clippings/2026-05/Article-Title.md",
+	"telegraphOk": true,
 	"telegraphUrl": "https://telegra.ph/Article-Title-05-21",
 	"telegramMessageId": 123
 }
 ```
 
-- `telegraphUrl` 和 `telegramMessageId` 仅在配置了 Telegraph + Telegram 且推送成功时返回。
+- `fnsOk` 表示 FNS 是否成功。
+- `telegraphOk` 表示 Telegraph / Telegram 是否成功。
+- `path` 仅在 FNS 成功时返回。
+- `telegraphUrl` 和 `telegramMessageId` 仅在 Telegraph / Telegram 成功时返回。
 
 **失败响应**
 
@@ -129,8 +134,8 @@
 1. 提取 URL
 2. 调 Jina Reader 抓网页正文
 3. 抽标题、清理正文、生成 frontmatter
-4. 写入 FNS / Obsidian
-5. 如果已配置 Telegraph/Telegram，则继续做推送
+4. FNS 和 Telegraph / Telegram 并行执行
+5. 任一链路成功都尽量返回结果
 
 ## 输出格式
 
@@ -176,7 +181,7 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 ## Telegraph 与 Telegram 推送
 
-当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、剪藏通知 Bot（`CLIP_BOT` + `USER_ID`，兼容旧 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`）时，FNS 写入成功后 Worker 会自动：
+当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、剪藏通知 Bot（`CLIP_BOT` + `USER_ID`，兼容旧 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`）时，Worker 会独立执行 Telegraph / Telegram 这条链路：
 
 1. 重新抓取原网页 HTML，清理并转换为 Telegraph Node 格式
 2. 调用 Telegraph `createPage` 创建可阅读的在线页面
@@ -191,7 +196,13 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 **降级行为**：如果原网页 HTML 抓取失败，Worker 才会用 Jina Markdown 正文生成简化 HTML，再转换为 Telegraph Node。FNS 笔记仍使用 Jina Markdown，不受 Telegraph HTML 链路影响。
 
-**失败不影响主流程**：如果 Telegraph 创建页面或 Telegram 发送消息失败，Worker 仍然会返回 FNS 写入成功的结果（`ok: true`），只是响应中不包含 `telegraphUrl` 和 `telegramMessageId`。FNS 写入始终优先，Telegraph/Telegram 推送是附加的"锦上添花"。
+**并行语义**：FNS 和 Telegraph / Telegram 互不依赖。可能出现：
+
+- `fnsOk=true` 且 `telegraphOk=true`
+- `fnsOk=true` 且 `telegraphOk=false`
+- `fnsOk=false` 且 `telegraphOk=true`
+
+只有当两条链路都失败时，接口才会返回 `502`。
 
 **环境变量**：推荐使用 `IMG_BOT` 负责图片、`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。配置方法参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 

@@ -452,6 +452,8 @@ describe('Telegraph + Telegram integration', () => {
 		expect(response.status).toBe(200);
 		const json = await response.json();
 		expect(json.ok).toBe(true);
+		expect(json.fnsOk).toBe(true);
+		expect(json.telegraphOk).toBe(true);
 		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
 		expect(json.telegramMessageId).toBe(99);
 
@@ -543,6 +545,9 @@ Body.`;
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.fnsOk).toBe(true);
+		expect(json.telegraphOk).toBe(true);
 		expect(fetchMock.mock.calls[2][0]).toBe('https://example.com/article');
 		expect(fetchMock.mock.calls[3][0]).toBe('https://example.com/cover.jpg');
 		expect(fetchMock.mock.calls[4][0]).toBe(`https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`);
@@ -570,7 +575,60 @@ Body.`;
 		expect(response.status).toBe(200);
 		const json = await response.json();
 		expect(json.ok).toBe(true);
+		expect(json.fnsOk).toBe(true);
+		expect(json.telegraphOk).toBe(false);
 		expect(json.telegraphUrl).toBeUndefined();
+	});
+
+	it('POST / when FNS fails - Telegraph still succeeds, returns telegraphUrl without path', async () => {
+		const sourceHtml = '<article><p>HTML body</p></article>';
+
+		fetchMock
+			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: false, error: 'vault not found' }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }))
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), { status: 200 }));
+
+		const request = createRequest({ url: 'https://example.com/article' });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, telegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.ok).toBe(true);
+		expect(json.fnsOk).toBe(false);
+		expect(json.path).toBeUndefined();
+		expect(json.telegraphOk).toBe(true);
+		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
+		expect(json.telegramMessageId).toBe(101);
+	});
+
+	it('POST / when FNS and Telegraph both fail - returns 502', async () => {
+		fetchMock
+			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: false, error: 'vault not found' }), { status: 200 }))
+			.mockResolvedValueOnce(new Response('<article><p>HTML body</p></article>', { status: 200, headers: { 'Content-Type': 'text/html' } }))
+			.mockRejectedValueOnce(new Error('Telegraph API error'));
+
+		const request = createRequest({ url: 'https://example.com/article' });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, telegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(502);
+		const json = await response.json();
+		expect(json.error).toContain('FNS failed:');
+		expect(json.error).toContain('Telegraph failed:');
 	});
 });
 
