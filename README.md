@@ -298,6 +298,25 @@ curl -X POST https://web-clipper.<your>.workers.dev/upload-html \
   -F "url=https://example.com"
 ```
 
+#### SingleFile 插件设置
+
+浏览器安装 SingleFile 扩展后，建议这样配置：
+
+1. 打开 SingleFile 设置
+2. 选择：`保存到 REST 表单 API`
+3. 网址：`https://web-clipper.<your>.workers.dev/upload-html`
+4. 授权令牌：你的 `API_KEY`
+5. 文件字段名称：`singlehtmlfile`
+6. 网址字段名称：`url`
+
+可选但推荐：
+
+1. 文件名模版：`{url-host}{url-pathname-flat}.{filename-extension}`
+2. 文件名最大长度：`384`
+3. 文件名替换字符：`$`
+
+这样 SingleFile 保存网页时，会直接把完整 HTML 上传到 Worker。
+
 ### Telegram 入口示例
 
 直接给 `CLIP_BOT` 发以下任意一种消息：

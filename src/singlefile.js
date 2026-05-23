@@ -1,26 +1,14 @@
 import { Readability } from '@mozilla/readability';
-import TurndownService from 'turndown';
 import { parseHTML } from 'linkedom';
 
 const MAX_HTML_SIZE = 10 * 1024 * 1024;
-
-const turndown = new TurndownService({
-	headingStyle: 'atx',
-	codeBlockStyle: 'fenced',
-	bulletListMarker: '-',
-});
-
-turndown.addRule('removeScriptsAndStyles', {
-	filter: ['script', 'style', 'noscript'],
-	replacement: () => '',
-});
 
 export async function parseSingleFileUpload(request) {
 	const form = await request.formData();
 	const rawUrl = String(form.get('url') || '').trim();
 	const file = form.get('singlehtmlfile');
 
-	if (!(file instanceof File)) {
+	if (!isUploadableFile(file)) {
 		throw new Error('Missing singlehtmlfile');
 	}
 	if (file.size > MAX_HTML_SIZE) {
@@ -48,13 +36,20 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 	const { document, window } = parseHTML(html);
 	const docUrl = resolveDocumentUrl(document, url, filename);
 
-	const article = new Readability(document, {
-		keepClasses: false,
-	}).parse();
+	let article = null;
+	try {
+		article = withDomGlobals(window, () =>
+			new Readability(document, {
+				keepClasses: false,
+			}).parse(),
+		);
+	} catch {
+		article = null;
+	}
 
 	const title = normalizeTitle(article?.title || document.title || stripHtmlExtension(filename) || 'untitled');
-	const articleHtml = article?.content || extractBodyInnerHtml(document);
-	const markdownBody = turndown.turndown(articleHtml || '');
+	const articleHtml = article?.content || extractReadableFallbackHtml(document) || extractBodyInnerHtml(document);
+	const markdownBody = htmlFragmentToMarkdown(articleHtml);
 
 	if (!markdownBody.trim()) {
 		throw new Error('singlehtmlfile produced empty article');
@@ -85,6 +80,10 @@ function extractBodyInnerHtml(document) {
 	return document.body?.innerHTML || document.documentElement?.innerHTML || '';
 }
 
+function extractReadableFallbackHtml(document) {
+	return document.querySelector('article, main, [role="main"]')?.innerHTML || '';
+}
+
 function stripHtmlExtension(filename) {
 	return String(filename || '').replace(/\.(html?|xhtml)$/i, '');
 }
@@ -93,4 +92,166 @@ function normalizeTitle(value) {
 	return String(value || '')
 		.replace(/\s+/g, ' ')
 		.trim();
+}
+
+function htmlFragmentToMarkdown(articleHtml) {
+	if (!articleHtml || !articleHtml.trim()) return '';
+	const { document } = parseHTML(`<!doctype html><html><body>${articleHtml}</body></html>`);
+	const root = document.body || document.firstElementChild || document.documentElement;
+	if (!root) return '';
+	const parts = [];
+	for (const child of Array.from(root.childNodes || [])) {
+		const chunk = renderNode(child, 0);
+		if (chunk.trim()) parts.push(chunk.trim());
+	}
+	return parts.join('\n\n').trim();
+}
+
+function withDomGlobals(window, fn) {
+	const keys = ['document', 'Node', 'NodeFilter', 'HTMLElement', 'HTMLImageElement', 'HTMLAnchorElement', 'Text'];
+	const previous = new Map();
+
+	for (const key of keys) {
+		previous.set(key, globalThis[key]);
+		if (window?.[key] !== undefined) {
+			globalThis[key] = window[key];
+		}
+	}
+
+	try {
+		return fn();
+	} finally {
+		for (const key of keys) {
+			if (previous.get(key) === undefined) {
+				delete globalThis[key];
+			} else {
+				globalThis[key] = previous.get(key);
+			}
+		}
+	}
+}
+
+function renderNode(node, listDepth) {
+	if (!node) return '';
+	if (node.nodeType === 3) {
+		return normalizeInlineText(node.textContent || '');
+	}
+	if (node.nodeType !== 1) return '';
+
+	const tag = String(node.tagName || '').toLowerCase();
+	switch (tag) {
+		case 'article':
+		case 'main':
+		case 'section':
+		case 'div':
+		case 'body':
+			return joinBlocks(node.childNodes, listDepth);
+		case 'h1':
+		case 'h2':
+		case 'h3':
+		case 'h4':
+		case 'h5':
+		case 'h6':
+			return `${'#'.repeat(Number(tag[1]))} ${renderInlineChildren(node)}`.trim();
+		case 'p':
+			return renderInlineChildren(node);
+		case 'blockquote':
+			return renderInlineChildren(node)
+				.split('\n')
+				.map((line) => `> ${line}`.trimEnd())
+				.join('\n');
+		case 'pre': {
+			const code = node.textContent || '';
+			return `\`\`\`\n${code.trimEnd()}\n\`\`\``;
+		}
+		case 'ul':
+			return Array.from(node.children)
+				.map((child) => renderListItem(child, listDepth, '-'))
+				.join('\n');
+		case 'ol':
+			return Array.from(node.children)
+				.map((child, index) => renderListItem(child, listDepth, `${index + 1}.`))
+				.join('\n');
+		case 'img': {
+			const src = node.getAttribute('src') || '';
+			const alt = node.getAttribute('alt') || '';
+			return src ? `![${alt}](${src})` : '';
+		}
+		case 'hr':
+			return '---';
+		case 'br':
+			return '\n';
+		default:
+			return renderInlineChildren(node);
+	}
+}
+
+function renderListItem(node, listDepth, marker) {
+	const content = renderInlineChildren(node).trim() || joinBlocks(node.childNodes, listDepth + 1).trim();
+	const indent = '  '.repeat(listDepth);
+	return `${indent}${marker} ${content}`.trimEnd();
+}
+
+function renderInlineChildren(node) {
+	const parts = [];
+	for (const child of Array.from(node.childNodes)) {
+		if (child.nodeType === 3) {
+			parts.push(normalizeInlineText(child.textContent || ''));
+			continue;
+		}
+		if (child.nodeType !== 1) continue;
+		const tag = String(child.tagName || '').toLowerCase();
+		if (tag === 'a') {
+			const href = child.getAttribute('href') || '';
+			const text = renderInlineChildren(child) || normalizeInlineText(child.textContent || '');
+			parts.push(href ? `[${text}](${href})` : text);
+			continue;
+		}
+		if (tag === 'strong' || tag === 'b') {
+			parts.push(`**${renderInlineChildren(child)}**`);
+			continue;
+		}
+		if (tag === 'em' || tag === 'i') {
+			parts.push(`*${renderInlineChildren(child)}*`);
+			continue;
+		}
+		if (tag === 'code') {
+			parts.push(`\`${child.textContent || ''}\``);
+			continue;
+		}
+		if (tag === 'br') {
+			parts.push('\n');
+			continue;
+		}
+		if (tag === 'img') {
+			const src = child.getAttribute('src') || '';
+			const alt = child.getAttribute('alt') || '';
+			if (src) parts.push(`![${alt}](${src})`);
+			continue;
+		}
+		const blockLike = ['p', 'div', 'section', 'article', 'ul', 'ol', 'pre', 'blockquote'].includes(tag);
+		parts.push(blockLike ? `\n${renderNode(child, 0)}\n` : renderInlineChildren(child));
+	}
+	return normalizeInlineText(parts.join('')).replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function joinBlocks(childNodes, listDepth) {
+	return Array.from(childNodes)
+		.map((child) => renderNode(child, listDepth))
+		.filter((chunk) => chunk && chunk.trim())
+		.join('\n\n');
+}
+
+function normalizeInlineText(text) {
+	return String(text || '').replace(/\s+/g, ' ');
+}
+
+function isUploadableFile(value) {
+	return Boolean(
+		value &&
+			typeof value === 'object' &&
+			typeof value.name === 'string' &&
+			typeof value.size === 'number' &&
+			typeof value.text === 'function',
+	);
 }
