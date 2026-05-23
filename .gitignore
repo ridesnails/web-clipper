@@ -158,16 +158,12 @@ dist
 .yarn/install-state.gz
 .pnp.\*
 
-# wrangler project
-
+# wrangler / local env
 .dev.vars*
 !.dev.vars.example
 .env*
 !.env.example
 .wrangler/
-
-
-.dev.vars
 .ace-tool/
 
 # local clipper debug artifacts
@@ -176,3 +172,6 @@ plan_clip_ai_telegram_title/
 temp-real-clip-test.mjs
 temp-run-real-worker.sh
 tmp/
+
+# local OS/editor noise
+.DS_Store
