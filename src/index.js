@@ -1,4 +1,5 @@
 import { sendPhoto, sendMessage, getFile } from './telegram.js';
+import { parseSingleFileUpload } from './singlefile.js';
 import { createPage, htmlToTelegraphNodes } from './telegraph.js';
 
 // CORS 响应头
@@ -63,140 +64,165 @@ const worker = {
 			return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(env) });
 		}
 
-		// —— 第二关：解析 body ——
-		let reqBody;
-		try {
-			reqBody = await request.json();
-		} catch {
-			return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
+		if (pathname === '/upload-html') {
+			return handleSingleFileClipRequest(request, env);
 		}
-		const url = reqBody.url;
-		if (!url || typeof url !== 'string') {
-			return Response.json({ error: "Missing 'url' field" }, { status: 400, headers: corsHeaders(env) });
-		}
-		if (!isValidUrl(url)) {
-			return Response.json({ error: 'Invalid url (must be http or https)' }, { status: 400, headers: corsHeaders(env) });
-		}
-
-		// —— 第三关：用 jina 把网页转成 Markdown ——
-		let markdown;
-		try {
-			const jinaHeaders = { Accept: 'text/plain' };
-			// 如果配置了 JINA_API_KEY，则添加认证头
-			if (env.JINA_API_KEY) {
-				jinaHeaders.Authorization = `Bearer ${env.JINA_API_KEY}`;
-			}
-
-			let jinaRes;
-			let lastErr;
-			for (let attempt = 0; attempt <= 2; attempt++) {
-				if (attempt > 0) {
-					const delay = attempt === 1 ? 1000 : 2000;
-					await new Promise((r) => setTimeout(r, delay));
-				}
-				jinaRes = await fetch(`https://r.jina.ai/${url}`, {
-					headers: jinaHeaders,
-					signal: AbortSignal.timeout(25000), // 25 秒超时
-				});
-				if (jinaRes.ok) {
-					break;
-				}
-				const errText = await jinaRes.text();
-				lastErr = `${jinaRes.status} ${errText}`;
-				console.error('Jina returned non-200:', url, jinaRes.status, errText);
-				const shouldRetry = jinaRes.status === 429 || jinaRes.status >= 500;
-				if (!shouldRetry || attempt === 2) {
-					return Response.json({ error: `Jina fetch failed: ${lastErr}` }, { status: 502, headers: corsHeaders(env) });
-				}
-			}
-			markdown = await jinaRes.text();
-		} catch (e) {
-			console.error('Jina fetch failed:', url, e.message);
-			return Response.json({ error: `Jina error: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
-		}
-
-		// —— 第四关：抽标题、清理正文、生成文件路径 ——
-		const title = extractTitle(markdown) || 'untitled';
-		const slug = makeSlug(title);
-		const now = new Date();
-		const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-		const timestamp = now
-			.toISOString()
-			.replace(/[-:]/g, '')
-			.replace(/\.\d{3}Z$/, 'Z');
-		const path = `${env.CLIP_FOLDER}/${yyyymm}/${timestamp}-${slug}.md`;
-
-		// 剥掉 jina 的元信息头，拼带 frontmatter 的最终内容
-		const cleanBody = stripEmptyLinks(cleanJinaBody(markdown));
-		let aiMetadata = null;
-		if (env.AI_API_KEY) {
-			try {
-				aiMetadata = await generateAiMetadata({ title, url, body: cleanBody, env });
-			} catch (e) {
-				console.error('AI metadata generation failed:', e.message);
-			}
-		}
-		const summary = aiMetadata?.summary || '';
-		const tags = aiMetadata?.tags || [];
-		const content = buildNote({
-			title,
-			url,
-			date: now.toISOString(),
-			body: cleanBody,
-			summary,
-			tags,
-		});
-
-		const telegraphEnabled = Boolean(env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID));
-		const [fnsResult, telegraphResult] = await Promise.allSettled([
-			writeToFns({ path, content, env }),
-			telegraphEnabled ? pushTelegraphAndTelegram({ requestUrl: request.url, articleUrl: url, title, cleanBody, summary, tags, env }) : Promise.resolve(null),
-		]);
-
-		const fnsOk = fnsResult.status === 'fulfilled';
-		const telegraphOk = telegraphEnabled ? telegraphResult.status === 'fulfilled' : false;
-		const telegraphData = telegraphEnabled && telegraphResult.status === 'fulfilled' ? telegraphResult.value : {};
-
-		if (!fnsOk && (!telegraphEnabled || !telegraphOk)) {
-			const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
-			if (!telegraphEnabled) {
-				return Response.json({ error: `FNS failed: ${fnsError}` }, { status: 502, headers: corsHeaders(env) });
-			}
-			const telegraphError =
-				telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
-			return Response.json({ error: `FNS failed: ${fnsError}; Telegraph failed: ${telegraphError}` }, { status: 502, headers: corsHeaders(env) });
-		}
-
-		if (!fnsOk) {
-			const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
-			console.error('FNS write failed:', path, fnsError);
-		}
-
-		if (telegraphEnabled && !telegraphOk) {
-			const telegraphError =
-				telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
-			console.error('Telegraph/Telegram push failed:', telegraphError);
-		}
-
-		console.log('Clipped:', title, '->', path);
-		return Response.json(
-			{
-				ok: true,
-				title,
-				fnsOk,
-				path: fnsOk ? path : undefined,
-				telegraphOk,
-				telegraphUrl: telegraphData.telegraphUrl || undefined,
-				telegramMessageId: telegraphData.telegramMessageId || undefined,
-			},
-			{ headers: corsHeaders(env) },
-		);
+		return handleJsonClipRequest(request, env);
 	},
 };
 
 export default worker;
 
 // —— 工具函数 ——
+
+async function handleJsonClipRequest(request, env) {
+	let reqBody;
+	try {
+		reqBody = await request.json();
+	} catch {
+		return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
+	}
+
+	const url = reqBody.url;
+	if (!url || typeof url !== 'string') {
+		return Response.json({ error: "Missing 'url' field" }, { status: 400, headers: corsHeaders(env) });
+	}
+	if (!isValidUrl(url)) {
+		return Response.json({ error: 'Invalid url (must be http or https)' }, { status: 400, headers: corsHeaders(env) });
+	}
+
+	try {
+		const article = await fetchArticleFromUrl(url, env);
+		return await clipArticle({ requestUrl: request.url, article, env });
+	} catch (e) {
+		console.error('Jina fetch failed:', url, e.message);
+		return Response.json({ error: `Jina error: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
+	}
+}
+
+async function handleSingleFileClipRequest(request, env) {
+	try {
+		const article = await parseSingleFileUpload(request);
+		return await clipArticle({ requestUrl: request.url, article, env });
+	} catch (e) {
+		return Response.json({ error: e.message }, { status: 400, headers: corsHeaders(env) });
+	}
+}
+
+async function fetchArticleFromUrl(url, env) {
+	const jinaHeaders = { Accept: 'text/plain' };
+	if (env.JINA_API_KEY) {
+		jinaHeaders.Authorization = `Bearer ${env.JINA_API_KEY}`;
+	}
+
+	let jinaRes;
+	let lastErr;
+	for (let attempt = 0; attempt <= 2; attempt++) {
+		if (attempt > 0) {
+			const delay = attempt === 1 ? 1000 : 2000;
+			await new Promise((r) => setTimeout(r, delay));
+		}
+		jinaRes = await fetch(`https://r.jina.ai/${url}`, {
+			headers: jinaHeaders,
+			signal: AbortSignal.timeout(25000),
+		});
+		if (jinaRes.ok) break;
+
+		const errText = await jinaRes.text();
+		lastErr = `${jinaRes.status} ${errText}`;
+		console.error('Jina returned non-200:', url, jinaRes.status, errText);
+		const shouldRetry = jinaRes.status === 429 || jinaRes.status >= 500;
+		if (!shouldRetry || attempt === 2) {
+			throw new Error(`Jina fetch failed: ${lastErr}`);
+		}
+	}
+
+	const markdown = await jinaRes.text();
+	return {
+		title: extractTitle(markdown) || 'untitled',
+		url,
+		markdownBody: stripEmptyLinks(cleanJinaBody(markdown)),
+		sourceHtml: '',
+	};
+}
+
+async function clipArticle({ requestUrl, article, env }) {
+	const { title, url, markdownBody, sourceHtml } = article;
+	const slug = makeSlug(title);
+	const now = new Date();
+	const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+	const timestamp = now
+		.toISOString()
+		.replace(/[-:]/g, '')
+		.replace(/\.\d{3}Z$/, 'Z');
+	const path = `${env.CLIP_FOLDER}/${yyyymm}/${timestamp}-${slug}.md`;
+
+	let aiMetadata = null;
+	if (env.AI_API_KEY) {
+		try {
+			aiMetadata = await generateAiMetadata({ title, url, body: markdownBody, env });
+		} catch (e) {
+			console.error('AI metadata generation failed:', e.message);
+		}
+	}
+	const summary = aiMetadata?.summary || '';
+	const tags = aiMetadata?.tags || [];
+	const content = buildNote({
+		title,
+		url,
+		date: now.toISOString(),
+		body: markdownBody,
+		summary,
+		tags,
+	});
+
+	const telegraphEnabled = Boolean(env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID));
+	const [fnsResult, telegraphResult] = await Promise.allSettled([
+		writeToFns({ path, content, env }),
+		telegraphEnabled
+			? pushTelegraphAndTelegram({ requestUrl, articleUrl: url, title, cleanBody: markdownBody, sourceHtml, summary, tags, env })
+			: Promise.resolve(null),
+	]);
+
+	const fnsOk = fnsResult.status === 'fulfilled';
+	const telegraphOk = telegraphEnabled ? telegraphResult.status === 'fulfilled' : false;
+	const telegraphData = telegraphEnabled && telegraphResult.status === 'fulfilled' ? telegraphResult.value : {};
+
+	if (!fnsOk && (!telegraphEnabled || !telegraphOk)) {
+		const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
+		if (!telegraphEnabled) {
+			return Response.json({ error: `FNS failed: ${fnsError}` }, { status: 502, headers: corsHeaders(env) });
+		}
+		const telegraphError =
+			telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
+		return Response.json({ error: `FNS failed: ${fnsError}; Telegraph failed: ${telegraphError}` }, { status: 502, headers: corsHeaders(env) });
+	}
+
+	if (!fnsOk) {
+		const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
+		console.error('FNS write failed:', path, fnsError);
+	}
+
+	if (telegraphEnabled && !telegraphOk) {
+		const telegraphError =
+			telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
+		console.error('Telegraph/Telegram push failed:', telegraphError);
+	}
+
+	console.log('Clipped:', title, '->', path);
+	return Response.json(
+		{
+			ok: true,
+			title,
+			fnsOk,
+			path: fnsOk ? path : undefined,
+			telegraphOk,
+			telegraphUrl: telegraphData.telegraphUrl || undefined,
+			telegramMessageId: telegraphData.telegramMessageId || undefined,
+		},
+		{ headers: corsHeaders(env) },
+	);
+}
 
 async function writeToFns({ path, content, env }) {
 	const fnsRes = await fetch(`${env.FNS_BASE}/api/note`, {
@@ -219,13 +245,16 @@ async function writeToFns({ path, content, env }) {
 	return { path };
 }
 
-async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, summary, tags, env }) {
-	// Telegraph 内容优先参考原始网页 HTML，而不是 Jina Markdown。
-	const sourceHtml = await fetchSourceHtml(articleUrl);
-	const telegraphHtmlSource = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, articleUrl) : markdownBodyToHtml(cleanBody);
+async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, sourceHtml, summary, tags, env }) {
+	// Telegraph 内容优先使用 SingleFile 上传的 HTML；否则回退到原网页 HTML；再不行才回退到 Jina Markdown。
+	const uploadedHtml = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, articleUrl) : '';
+	const fetchedHtml = uploadedHtml ? '' : await fetchSourceHtml(articleUrl);
+	const telegraphHtmlSource = uploadedHtml || (fetchedHtml ? prepareSourceHtmlForTelegraph(fetchedHtml, articleUrl) : markdownBodyToHtml(cleanBody));
 
 	// 从 HTML 中提取图片 URL；HTML 获取失败时降级提取 Markdown 图片。
-	const imageItems = sourceHtml ? extractHtmlImageUrls(sourceHtml, articleUrl) : extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
+	const imageItems = uploadedHtml || fetchedHtml
+		? extractHtmlImageUrls(uploadedHtml || fetchedHtml, articleUrl)
+		: extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
 
 	// 下载每张图片并上传到 Telegram 频道，收集 file_id
 	const imageMappings = [];

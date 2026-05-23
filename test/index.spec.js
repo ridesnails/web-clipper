@@ -772,3 +772,104 @@ describe('Telegram webhook clip entry', () => {
 		expect(fetchMock.mock.calls[1][0]).toBe(`${webhookEnv.FNS_BASE}/api/note`);
 	});
 });
+
+// 9. SingleFile 上传入口测试
+describe('SingleFile upload entry', () => {
+	function createSingleFileRequest({ html, url = 'https://example.com/article', auth = `Bearer ${mockEnv.API_KEY}` }) {
+		const form = new FormData();
+		form.append('singlehtmlfile', new File([html], 'article.html', { type: 'text/html' }));
+		form.append('url', url);
+		const headers = auth ? { Authorization: auth } : undefined;
+		return new Request('http://example.com/upload-html', {
+			method: 'POST',
+			headers,
+			body: form,
+		});
+	}
+
+	it('POST /upload-html - success writes FNS without calling Jina', async () => {
+		const html = '<html><head><title>SingleFile Title</title></head><body><article><h1>SingleFile Title</h1><p>Hello from SingleFile.</p></article></body></html>';
+
+		fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+
+		const request = createSingleFileRequest({ html });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.ok).toBe(true);
+		expect(json.title).toBe('SingleFile Title');
+		expect(json.fnsOk).toBe(true);
+		expect(json.path).toContain('SingleFile-Title.md');
+		expect(json.telegraphOk).toBe(false);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0][0]).toBe(`${mockEnv.FNS_BASE}/api/note`);
+		const fnsPayload = JSON.parse(fetchMock.mock.calls[0][1].body);
+		expect(fnsPayload.content).toContain('Hello from SingleFile.');
+		expect(fnsPayload.content).not.toContain('Markdown Content:');
+	});
+
+	it('POST /upload-html with Telegraph config - prefers uploaded HTML instead of fetching source page', async () => {
+		const html = '<html><head><title>Uploaded HTML Title</title></head><body><article><h1>Uploaded HTML Title</h1><p>Body from uploaded file.</p><img src="https://img.example.com/cover.jpg"></article></body></html>';
+		const singleFileTelegraphEnv = {
+			...mockEnv,
+			TELEGRAPH_ACCESS_TOKEN: 'tg',
+			IMG_BOT: '111111:IMGbotToken',
+			TELEGRAM_CHAT_ID: '-1001234567890',
+			CLIP_BOT: '222222:CLIPbotToken',
+			USER_ID: '123',
+			PUBLIC_BASE_URL: telegraphPublicBaseUrl,
+		};
+
+		fetchMock
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
+			.mockResolvedValueOnce(
+				new Response(new Uint8Array([1, 2, 3]), {
+					status: 200,
+					headers: { 'Content-Type': 'image/jpeg' },
+				}),
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: {
+							message_id: 88,
+							photo: [{ file_id: 'photo-file-2', file_unique_id: 'uniq-2', width: 800 }],
+						},
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: { url: 'https://telegra.ph/Uploaded-05-21', path: 'Uploaded-05-21', title: 'Uploaded' },
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 102 } }), { status: 200 }));
+
+		const request = createSingleFileRequest({ html });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, singleFileTelegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.fnsOk).toBe(true);
+		expect(json.telegraphOk).toBe(true);
+		expect(fetchMock.mock.calls[0][0]).toBe(`${mockEnv.FNS_BASE}/api/note`);
+		expect(fetchMock.mock.calls[1][0]).toBe('https://img.example.com/cover.jpg');
+		expect(fetchMock.mock.calls[2][0]).toBe(`https://api.telegram.org/bot${singleFileTelegraphEnv.IMG_BOT}/sendPhoto`);
+		expect(fetchMock.mock.calls[4][0]).toBe(`https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendMessage`);
+		const telegraphPayload = JSON.parse(fetchMock.mock.calls[3][1].body);
+		const serializedNodes = JSON.stringify(JSON.parse(telegraphPayload.content));
+		expect(serializedNodes).toContain('Body from uploaded file.');
+		expect(serializedNodes).not.toContain('https://example.com/article');
+	});
+});

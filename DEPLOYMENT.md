@@ -395,7 +395,7 @@ curl -X POST https://web-clipper.<your>.workers.dev \
 - 本地 `.dev.vars` 里的 `PUBLIC_BASE_URL`
 - Cloudflare secret `PUBLIC_BASE_URL`
 
-## 7. 部署后的两个入口
+## 7. 部署后的三个入口
 
 ### 7.1 HTTP 入口：`POST /`
 
@@ -427,12 +427,42 @@ curl -X POST https://web-clipper.<your>.workers.dev \
 
 之后，给 `CLIP_BOT` 发送网页链接才会触发剪藏。
 
-### 7.3 客户端配置参考
+### 7.3 SingleFile 入口：`POST /upload-html`
 
-参见主 README 的「客户端接入示例」一节。最常用的两个：
+这是浏览器扩展入口。适合：
+
+- 登录态页面
+- Jina 抓不到的页面
+- 希望浏览器端先完整保存页面再上传
+
+配置完成后，SingleFile 会把完整 HTML 直接上传到：
+
+```text
+https://web-clipper.<your>.workers.dev/upload-html
+```
+
+请求协议：
+
+- `Authorization: Bearer <API_KEY>`
+- `multipart/form-data`
+- 文件字段名：`singlehtmlfile`
+- URL 字段名：`url`
+
+### 7.4 客户端配置参考
+
+参见主 README 的「使用示例」一节。最常用的三个：
 
 - **iOS Shortcut**（手机分享菜单一键剪藏）
 - **浏览器 Bookmarklet**（电脑书签栏一键剪藏）
+- **SingleFile REST 表单上传**（登录态 / 完整 HTML 页面）
+
+如果你要配置 SingleFile，建议这样填：
+
+1. 保存位置：`保存到 REST 表单 API`
+2. 网址：`https://web-clipper.<your>.workers.dev/upload-html`
+3. 授权令牌：你的 `API_KEY`
+4. 文件字段名称：`singlehtmlfile`
+5. 网址字段名称：`url`
 
 ## 8. 日常运维
 
@@ -507,9 +537,15 @@ const path = `${env.CLIP_FOLDER}/${yyyymm}/${slug}.md`;
 
 ### Q: 想剪藏需要登录态的页面
 
-当前架构无法在服务端带登录态抓取。FNS 正文使用的 Jina 是匿名抓取；Telegraph 页面使用的原网页 HTML 抓取也是 Worker 端匿名请求。短期解决方案：登录态页面用浏览器装 [SingleFile 扩展](https://github.com/gildas-lormeau/SingleFile) 直接保存为 HTML，不走 Worker。
+当前架构无法在服务端带登录态抓取。URL 入口里的 Jina 是匿名抓取；Telegraph 回退抓原网页 HTML 也是 Worker 端匿名请求。
 
-如果未来扩展功能，可以加一个 `POST /upload-html` 端点接收浏览器扩展上传的完整 HTML，跳过服务端匿名抓取：一份转 Markdown 写 FNS，一份清理后转 Telegraph Node。
+登录态页面请直接使用 **SingleFile 入口**：
+
+1. 浏览器安装 [SingleFile 扩展](https://github.com/gildas-lormeau/SingleFile)
+2. 配置 REST 表单上传到 `POST /upload-html`
+3. 用 `singlehtmlfile` 作为文件字段名，用 `url` 作为网址字段名
+
+这样 Worker 会直接使用浏览器里保存下来的完整 HTML，跳过服务端匿名抓取。
 
 ## 10. 卸载
 

@@ -18,28 +18,26 @@
 ```
 ┌─────────────────────────────┐
 │ 入口 A：POST /              │
-│ iOS Shortcut / Bookmarklet  │
-│ curl / 任意 HTTP 客户端     │
+│ 传 URL                      │
 └──────────────┬──────────────┘
                │
-               │  POST {url: "..."}
+┌──────────────▼──────────────┐
+│ 入口 B：POST /upload-html   │
+│ 传 SingleFile HTML          │
+└──────────────┬──────────────┘
                │
 ┌──────────────▼──────────────┐
-│ 入口 B：Telegram Bot        │
+│ 入口 C：Telegram Bot        │
 │ 发链接给 CLIP_BOT           │
 └──────────────┬──────────────┘
                │
-               │  Telegram webhook
-               ▼
-┌─────────────────────────────┐
+               ┌─────────────────────────────┐
 │ Cloudflare Worker           │
 │ web-clipper                 │
 │                             │
-│ 1. 提取 URL                 │
-│ 2. 调 Jina Reader           │
-│ 3. 清理正文 / 生成 frontmatter│
-│ 4. 写入 FNS                 │
-│ 5. 可选 Telegraph/Telegram  │
+│ 1. 标准化文章内容           │
+│ 2. 生成 Markdown/frontmatter│
+│ 3. FNS 与 Telegraph 并行    │
 └──────────────┬──────────────┘
                │
                ▼
@@ -49,7 +47,7 @@
 └─────────────────────────────┘
 ```
 
-## 两个入口
+## 三个入口
 
 ### 1. HTTP 入口：`POST /`
 
@@ -127,15 +125,45 @@
 - 无链接时：Bot 回复简短提示
 - 剪藏失败时：Bot 回复简短错误
 
+### 3. SingleFile 入口：`POST /upload-html`
+
+适合：
+
+- 登录态页面
+- Jina 抓不到正文的页面
+- 希望直接上传浏览器里已经保存好的完整 HTML
+
+请求格式：
+
+**Headers**
+
+| Name            | Required | Description        |
+| --------------- | -------- | ------------------ |
+| `Authorization` | ✅       | `Bearer <API_KEY>` |
+
+**Body**
+
+`multipart/form-data`
+
+- `singlehtmlfile`：SingleFile 导出的 `.html`
+- `url`：原始网页 URL
+
+行为约定：
+
+- 这个入口会跳过 `Jina`
+- 直接从上传 HTML 中提取正文，再走同一条剪藏主链路
+- Telegraph 也会优先复用这份上传 HTML，而不是重新抓网页
+
 ## 剪藏主链路
 
-不管入口来自 `POST /` 还是 `CLIP_BOT`，真正执行的都是同一条链路：
+不管入口来自 `POST /`、`POST /upload-html` 还是 `CLIP_BOT`，真正执行的都是同一条链路：
 
-1. 提取 URL
-2. 调 Jina Reader 抓网页正文
-3. 抽标题、清理正文、生成 frontmatter
-4. FNS 和 Telegraph / Telegram 并行执行
-5. 任一链路成功都尽量返回结果
+1. 标准化文章内容
+2. URL 入口走 `Jina`
+3. SingleFile 入口走上传 HTML 解析
+4. 生成 Markdown 和 frontmatter
+5. FNS 和 Telegraph / Telegram 并行执行
+6. 任一链路成功都尽量返回结果
 
 ## 输出格式
 
@@ -261,6 +289,15 @@ curl -X POST https://web-clipper.<your>.workers.dev \
   -d '{"url":"https://example.com"}'
 ```
 
+#### SingleFile REST 表单上传
+
+```bash
+curl -X POST https://web-clipper.<your>.workers.dev/upload-html \
+  -H "Authorization: Bearer <your-api-key>" \
+  -F "singlehtmlfile=@webpage.html" \
+  -F "url=https://example.com"
+```
+
 ### Telegram 入口示例
 
 直接给 `CLIP_BOT` 发以下任意一种消息：
@@ -286,7 +323,7 @@ Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 这套系统刻意做了几个反直觉的简化：
 
 - **没有队列、没有数据库、没有状态机** —— 个人单用户场景下 QPS ≈ 0，引入这些只增加复杂度，FNS 自己已经有完整的存储和同步层
-- **抓取在客户端 + Jina Reader 兜底** —— 不在服务端跑 Chromium / SingleFile，避开了 Worker 不能跑 CLI 的限制
+- **多源输入，统一主链路** —— URL 入口依赖 Jina；SingleFile 入口直接上传 HTML；两者最后都汇入同一套 FNS / Telegraph 并行链路
 - **AI 增强可选、失败不阻塞** —— 摘要和自动打标只在配置了 AI 变量时启用；失败时剪藏、FNS 写入、Telegraph/Telegram 主链路继续降级运行
 - **HTML 高保真存档不做** —— 个人剪藏场景下"高保真存档"通常是仓鼠症，回看率极低；如果将来真需要，可由 FNS 的附件同步 + Git 自动提交免费提供
 

@@ -11,5 +11,10 @@
   "devDependencies": {
     "vitest": "~3.2.0",
     "wrangler": "^4.91.0"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "linkedom": "^0.18.12",
+    "turndown": "^7.2.4"
   }
 }
