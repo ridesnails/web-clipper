@@ -4,6 +4,30 @@
 
 **核心理念**：轻量、可靠、零运维。整套服务跑在 Cloudflare 免费版上，不需要任何 always-on 服务器。
 
+## 一眼看懂
+
+这个项目现在有 3 个正式入口：
+
+| 入口 | 适合场景 | 实际走法 |
+| --- | --- | --- |
+| `POST /` | 普通网页、脚本调用、快捷指令 | URL -> Jina -> 剪藏 |
+| `POST /upload-html` | SingleFile、登录态页面、强前端页面 | HTML -> 直接解析 -> 剪藏 |
+| `CLIP_BOT` | Telegram 里直接发链接 | Telegram -> 提取 URL -> 剪藏 |
+
+三种入口最后都会汇入同一条主链路：
+
+1. 标准化文章内容
+2. 生成 Markdown 和 frontmatter
+3. `FNS` 与 `Telegraph / Telegram` 并行执行
+
+如果你只想快速开始：
+
+1. 配好 `FNS_BASE`、`FNS_VAULT`、`FNS_TOKEN`
+2. 配好 `API_KEY`、`JINA_API_KEY`
+3. 部署 Worker
+4. 先用 `POST /` 验证主链路
+5. 再逐步启用 Telegram / SingleFile / Telegraph
+
 ## 特性
 
 - 🪶 **轻量** —— 3 个核心源码模块（入口 + Telegraph + Telegram），无队列、无数据库、无依赖服务
@@ -165,7 +189,7 @@
 5. FNS 和 Telegraph / Telegram 并行执行
 6. 任一链路成功都尽量返回结果
 
-## 输出格式
+## 响应与输出
 
 每次剪藏在 FNS Vault 的 `Clippings/YYYY-MM/` 目录下生成一个 Markdown 文件：
 
@@ -193,7 +217,7 @@ summary: "一段可选 AI 摘要"
 （jina 抽取出的正文 markdown，元信息头已剥离）
 ```
 
-## CORS
+### CORS
 
 `POST /` 的所有响应均包含 CORS 头，支持浏览器 Bookmarklet 直接调用：
 
@@ -207,7 +231,7 @@ Worker 会自动处理 `OPTIONS` 预检请求，无需客户端额外配置。
 
 - `GET /favicon.ico` —— 返回 `204 No Content`（避免浏览器请求图标时产生 404 噪音）
 
-## Telegraph 与 Telegram 推送
+### Telegraph 与 Telegram 推送
 
 当 Worker 同时配置了 `TELEGRAPH_ACCESS_TOKEN`、剪藏通知 Bot（`CLIP_BOT` + `USER_ID`，兼容旧 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`）时，Worker 会独立执行 Telegraph / Telegram 这条链路：
 
@@ -370,6 +394,22 @@ Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 - `CI`：`push` / `pull_request` 时自动跑 `npm test`
 - `Deploy`：`push` 到 `main` 或手动触发时自动同步 Worker secrets 并部署到 Cloudflare
 
+#### 先创建 `CLOUDFLARE_API_TOKEN`
+
+给 GitHub Actions 用的 `CLOUDFLARE_API_TOKEN` 不是 `.dev.vars` 里的内容，需要你在 Cloudflare Dashboard 里单独创建：
+
+1. 打开 Cloudflare Dashboard
+2. 进入 `My Profile`
+3. 打开 `API Tokens`
+4. 选择 `Create Token`
+5. 选择自定义模板
+6. 至少给这些权限：
+   - `Account Settings: Read`
+   - `Workers Scripts: Edit`
+7. 生成后，把 token 存进 GitHub：
+   - `Settings -> Secrets and variables -> Actions`
+   - 名称填：`CLOUDFLARE_API_TOKEN`
+
 使用前，你需要先在 GitHub 仓库 `Settings -> Secrets and variables -> Actions` 中配置至少这些 secrets：
 
 - `CLOUDFLARE_API_TOKEN`
@@ -394,7 +434,14 @@ Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 - `AI_BASE_URL`
 - `AI_MODEL`
 
-参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+建议顺序：
+
+1. 先只配置主链路 secrets
+2. 推一个小改动到 `main`
+3. 确认 `CI` 和 `Deploy` workflow 都成功
+4. 再继续补 Telegraph / Telegram / SingleFile 相关 secrets
+
+完整部署步骤仍然看 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
 ## 设计取舍
 
