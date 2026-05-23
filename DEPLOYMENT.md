@@ -466,6 +466,57 @@ https://web-clipper.<your>.workers.dev/upload-html
 
 ## 8. 日常运维
 
+### GitHub Actions 自动部署（可选）
+
+如果你想在代码更新后自动部署到 Cloudflare，这个仓库已经内置了两套 workflow：
+
+- `.github/workflows/ci.yml`
+  作用：在 `push` / `pull_request` 时自动执行 `npm test`
+- `.github/workflows/deploy.yml`
+  作用：在 `push` 到 `main` 或手动触发时：
+  1. `npm ci`
+  2. `npm test`
+  3. 同步 Worker secrets
+  4. `npm run deploy`
+
+启用前，请先到 GitHub 仓库：
+
+```text
+Settings -> Secrets and variables -> Actions
+```
+
+至少添加这些 secrets：
+
+- `CLOUDFLARE_API_TOKEN`
+- `FNS_BASE`
+- `FNS_VAULT`
+- `CLIP_FOLDER`
+- `FNS_TOKEN`
+- `API_KEY`
+- `JINA_API_KEY`
+
+如果你还要启用 Telegraph / Telegram / SingleFile 完整能力，通常还需要继续添加：
+
+- `PUBLIC_BASE_URL`
+- `TELEGRAPH_ACCESS_TOKEN`
+- `IMG_BOT`
+- `IMG_CHAT_ID`
+- `TELEGRAM_CHAT_ID`
+- `CLIP_BOT`
+- `USER_ID`
+- `TELEGRAM_WEBHOOK_SECRET`
+- `AI_API_KEY`
+- `AI_BASE_URL`
+- `AI_MODEL`
+
+`CLOUDFLARE_API_TOKEN` 建议至少包含：
+
+- `Workers Scripts: Edit`
+- `Workers KV Storage: Edit`（如果后续扩展用到）
+- `Account Settings: Read`
+
+如果你只是使用当前仓库的 Worker 部署，核心是要能执行 `wrangler secret put` 和 `wrangler deploy`。
+
 ### 看实时日志
 
 任何剪藏失败都可以通过实时日志定位：

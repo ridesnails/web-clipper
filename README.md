@@ -335,6 +335,65 @@ Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 
 ## 部署
 
+### 一键部署到 Cloudflare
+
+你可以先把这个仓库导入到 Cloudflare Workers：
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://github.com/ridesnails/web-clipper)
+
+说明：这个按钮/入口的作用是**快速导入仓库并创建 Worker 项目**，不是把整套剪藏服务无配置跑起来。这个项目依赖多组运行 secrets，所以导入后仍然需要你在 Cloudflare 里补配置。
+
+最少需要补的主链路 secrets：
+
+- `FNS_BASE`
+- `FNS_VAULT`
+- `FNS_TOKEN`
+- `API_KEY`
+- `JINA_API_KEY`
+
+如果你还要启用 Telegraph / Telegram / SingleFile 完整能力，通常还需要继续配置：
+
+- `PUBLIC_BASE_URL`
+- `TELEGRAPH_ACCESS_TOKEN`
+- `IMG_BOT`
+- `IMG_CHAT_ID`
+- `CLIP_BOT`
+- `USER_ID`
+- `TELEGRAM_WEBHOOK_SECRET`
+
+完整部署和验证步骤见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
+
+### GitHub Actions 自动部署
+
+仓库内已包含两套 GitHub Actions：
+
+- `CI`：`push` / `pull_request` 时自动跑 `npm test`
+- `Deploy`：`push` 到 `main` 或手动触发时自动同步 Worker secrets 并部署到 Cloudflare
+
+使用前，你需要先在 GitHub 仓库 `Settings -> Secrets and variables -> Actions` 中配置至少这些 secrets：
+
+- `CLOUDFLARE_API_TOKEN`
+- `FNS_BASE`
+- `FNS_VAULT`
+- `CLIP_FOLDER`
+- `FNS_TOKEN`
+- `API_KEY`
+- `JINA_API_KEY`
+
+如果你还要启用 Telegraph / Telegram / SingleFile 完整能力，通常还需要继续配置：
+
+- `PUBLIC_BASE_URL`
+- `TELEGRAPH_ACCESS_TOKEN`
+- `IMG_BOT`
+- `IMG_CHAT_ID`
+- `TELEGRAM_CHAT_ID`
+- `CLIP_BOT`
+- `USER_ID`
+- `TELEGRAM_WEBHOOK_SECRET`
+- `AI_API_KEY`
+- `AI_BASE_URL`
+- `AI_MODEL`
+
 参见 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
 ## 设计取舍

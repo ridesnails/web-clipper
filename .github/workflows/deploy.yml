@@ -1,0 +1,87 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      FNS_BASE: ${{ secrets.FNS_BASE }}
+      FNS_VAULT: ${{ secrets.FNS_VAULT }}
+      CLIP_FOLDER: ${{ secrets.CLIP_FOLDER }}
+      FNS_TOKEN: ${{ secrets.FNS_TOKEN }}
+      API_KEY: ${{ secrets.API_KEY }}
+      JINA_API_KEY: ${{ secrets.JINA_API_KEY }}
+      PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+      TELEGRAPH_ACCESS_TOKEN: ${{ secrets.TELEGRAPH_ACCESS_TOKEN }}
+      IMG_BOT: ${{ secrets.IMG_BOT }}
+      IMG_CHAT_ID: ${{ secrets.IMG_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      CLIP_BOT: ${{ secrets.CLIP_BOT }}
+      USER_ID: ${{ secrets.USER_ID }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      AI_BASE_URL: ${{ secrets.AI_BASE_URL }}
+      AI_MODEL: ${{ secrets.AI_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Install Wrangler
+        run: npm install --no-save wrangler@4.91.0
+
+      - name: Sync Worker secrets
+        run: |
+          set -euo pipefail
+
+          sync_secret() {
+            local key="$1"
+            local value="${2:-}"
+            if [ -n "$value" ]; then
+              printf '%s' "$value" | npx wrangler secret put "$key"
+            fi
+          }
+
+          sync_secret FNS_BASE "${FNS_BASE:-}"
+          sync_secret FNS_VAULT "${FNS_VAULT:-}"
+          sync_secret CLIP_FOLDER "${CLIP_FOLDER:-}"
+          sync_secret FNS_TOKEN "${FNS_TOKEN:-}"
+          sync_secret API_KEY "${API_KEY:-}"
+          sync_secret JINA_API_KEY "${JINA_API_KEY:-}"
+          sync_secret PUBLIC_BASE_URL "${PUBLIC_BASE_URL:-}"
+          sync_secret TELEGRAPH_ACCESS_TOKEN "${TELEGRAPH_ACCESS_TOKEN:-}"
+          sync_secret IMG_BOT "${IMG_BOT:-}"
+          sync_secret IMG_CHAT_ID "${IMG_CHAT_ID:-}"
+          sync_secret TELEGRAM_CHAT_ID "${TELEGRAM_CHAT_ID:-}"
+          sync_secret CLIP_BOT "${CLIP_BOT:-}"
+          sync_secret USER_ID "${USER_ID:-}"
+          sync_secret TELEGRAM_WEBHOOK_SECRET "${TELEGRAM_WEBHOOK_SECRET:-}"
+          sync_secret AI_API_KEY "${AI_API_KEY:-}"
+          sync_secret AI_BASE_URL "${AI_BASE_URL:-}"
+          sync_secret AI_MODEL "${AI_MODEL:-}"
+
+      - name: Deploy to Cloudflare
+        run: npm run deploy
