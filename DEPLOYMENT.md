@@ -118,21 +118,28 @@ npx wrangler dev
 
 ### 3.1 创建本地开发用的 `.dev.vars`
 
-在项目根目录新建 `.dev.vars` 文件。FNS 地址、Vault/仓库名、剪藏目录也放这里，不写入 `wrangler.jsonc`：
+在项目根目录新建 `.dev.vars` 文件。先按“所有入口共用的主链路配置”填写，后面的 Telegraph / Telegram / Bot 入口配置按需补充：
 
 ```
+# 所有入口共用：主剪藏链路
 FNS_BASE=https://<你的FNS地址>
 FNS_VAULT=<你的Vault名>
 CLIP_FOLDER=Clippings
-PUBLIC_BASE_URL=https://<你的Worker公开地址>
 FNS_TOKEN=<你的FNS Token>
 API_KEY=<你自己编的API_KEY>
 JINA_API_KEY=<你的Jina API Key>
+
+# 可选：Telegraph / Telegram 通知
+PUBLIC_BASE_URL=https://<你的Worker公开地址>
 TELEGRAPH_ACCESS_TOKEN=<你的Telegraph access_token>
 IMG_BOT=<图片Bot Token>
 IMG_CHAT_ID=<图片频道/群组ID，可省略并 fallback 到 TELEGRAM_CHAT_ID>
 CLIP_BOT=<剪藏通知Bot Token>
 USER_ID=<剪藏通知接收者ID>
+
+# 可选：Telegram Bot 入口
+TELEGRAM_WEBHOOK_SECRET=<随机32字节hex字符串>
+
 # 兼容旧配置：TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 仍可作为 fallback
 ```
 
@@ -170,7 +177,9 @@ echo ".dev.vars" >> .gitignore
 
 ### 3.4 给 Cloudflare 部署环境也设置变量/Secrets
 
-由于 `.dev.vars` 只用于本地开发，部署到 Cloudflare 时需要把同名变量设置到 Worker 环境中。为避免个人 FNS 地址和 Vault 名进入仓库，建议全部通过 `wrangler secret put` 写入 Cloudflare，而不是写进 `wrangler.jsonc`：
+由于 `.dev.vars` 只用于本地开发，部署到 Cloudflare 时需要把同名变量设置到 Worker 环境中。建议按“共用主链路”先配一遍，确认 `POST /` 能用，再继续配置 Telegram / Telegraph：
+
+#### 3.4.1 先配置所有入口共用的主链路 secrets
 
 ```bash
 npx wrangler secret put FNS_BASE
@@ -181,9 +190,6 @@ npx wrangler secret put FNS_VAULT
 
 npx wrangler secret put CLIP_FOLDER
 # 提示后粘贴 CLIP_FOLDER，例如 Clippings，回车
-
-npx wrangler secret put PUBLIC_BASE_URL
-# 如启用 Telegraph 图片代理，提示后粘贴 Worker 公网地址，回车
 
 npx wrangler secret put FNS_TOKEN
 # 提示后粘贴 FNS_TOKEN，回车
@@ -199,13 +205,13 @@ npx wrangler secret put JINA_API_KEY
 
 每次成功会显示 `✨ Success! Uploaded secret`。
 
-### Telegraph 与 Telegram 配置（可选）
+#### 3.4.2 再配置 Telegraph / Telegram（可选）
 
 如需启用 Telegraph 页面生成和 Telegram 推送，需要配置以下 secrets。推荐拆成两个 Bot：`IMG_BOT` 负责 Telegraph 图片中转，`CLIP_BOT` + `USER_ID` 负责剪藏通知；旧的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 仍作为兼容 fallback。
 
 启用后，主流程仍然是 Jina Markdown → FNS 写入 Obsidian。FNS 写入成功后，Worker 会额外重新抓取原网页 HTML，清理脚本和样式，把相对链接转成绝对链接，再转换为 Telegraph Node 创建 Telegraph 页面。如果原网页 HTML 抓取失败，才会降级用 Jina Markdown 正文生成简化 HTML。
 
-#### 1. TELEGRAPH_ACCESS_TOKEN
+##### 1. TELEGRAPH_ACCESS_TOKEN
 
 Telegraph 账号的 access token。
 
@@ -223,7 +229,7 @@ curl "https://api.telegra.ph/createAccount?short_name=YourApp&author_name=YourNa
 npx wrangler secret put TELEGRAPH_ACCESS_TOKEN
 ```
 
-#### 2. IMG_BOT / IMG_CHAT_ID（图片中转）
+##### 2. IMG_BOT / IMG_CHAT_ID（图片中转）
 
 `IMG_BOT` 是用于上传文章图片的 Telegram Bot API Token；`IMG_CHAT_ID` 是图片 Bot 所在频道或群组 ID。Worker 会优先从原网页 HTML 的 `<img src="...">` 提取图片，先上传到 Telegram，再通过 Worker 的 `/image-proxy?file_id=...` 给 Telegraph 引用。
 
@@ -241,11 +247,13 @@ npx wrangler secret put TELEGRAPH_ACCESS_TOKEN
 ```bash
 npx wrangler secret put IMG_BOT
 npx wrangler secret put IMG_CHAT_ID
+npx wrangler secret put PUBLIC_BASE_URL
+# 如启用 Telegraph 图片代理，提示后粘贴 Worker 公网地址，回车
 ```
 
 > 如果未设置 `IMG_CHAT_ID`，图片链路会 fallback 到旧 `TELEGRAM_CHAT_ID`。
 
-#### 3. CLIP_BOT / USER_ID（剪藏通知 + Bot 剪藏入口）
+##### 3. CLIP_BOT / USER_ID（剪藏通知 + Bot 剪藏入口）
 
 `CLIP_BOT` 是用于发送剪藏完成通知的 Telegram Bot API Token，也可以作为新的剪藏入口：直接把网页链接发给这个 Bot。`USER_ID` 是接收剪藏通知的用户、频道或群组 ID，同时作为 Bot 剪藏入口的白名单。消息首行会放 Telegraph 裸链接，并同时传 `link_preview_options.url`，用于触发 Telegram 即时预览。
 
@@ -265,7 +273,11 @@ npx wrangler secret put USER_ID
 
 > 兼容旧配置：如果没有拆分 Bot，也可以只设置 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`，代码会作为 fallback 使用；推荐新部署使用 `IMG_BOT` + `CLIP_BOT` + `USER_ID`。
 
-#### 4. TELEGRAM_WEBHOOK_SECRET（Bot 入口防伪造）
+#### 3.4.3 最后配置 Telegram Bot 入口（可选）
+
+只有当你想把 `CLIP_BOT` 作为第二个剪藏入口时，才需要这一组配置。
+
+##### 1. TELEGRAM_WEBHOOK_SECRET（Bot 入口防伪造）
 
 `TELEGRAM_WEBHOOK_SECRET` 用于校验 `/telegram-webhook` 请求确实来自 Telegram。`USER_ID` 负责白名单，`TELEGRAM_WEBHOOK_SECRET` 负责请求来源校验，两者都需要。
 
@@ -378,7 +390,39 @@ curl -X POST https://web-clipper.<your>.workers.dev \
 - 本地 `.dev.vars` 里的 `PUBLIC_BASE_URL`
 - Cloudflare secret `PUBLIC_BASE_URL`
 
-## 7. 配置客户端入口
+## 7. 部署后的两个入口
+
+### 7.1 HTTP 入口：`POST /`
+
+这是默认入口。只要你已经完成：
+
+- `FNS_BASE`
+- `FNS_VAULT`
+- `CLIP_FOLDER`
+- `FNS_TOKEN`
+- `API_KEY`
+- `JINA_API_KEY`
+
+那么现在就可以通过：
+
+- iOS Shortcut
+- 浏览器 Bookmarklet
+- `curl`
+
+调用 `POST /` 开始剪藏。
+
+### 7.2 Telegram Bot 入口：`CLIP_BOT`
+
+这是附加入口。只有你额外完成了：
+
+- `CLIP_BOT`
+- `USER_ID`
+- `TELEGRAM_WEBHOOK_SECRET`
+- `setWebhook`
+
+之后，给 `CLIP_BOT` 发送网页链接才会触发剪藏。
+
+### 7.3 客户端配置参考
 
 参见主 README 的「客户端接入示例」一节。最常用的两个：
 
