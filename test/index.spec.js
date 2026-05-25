@@ -872,4 +872,35 @@ describe('SingleFile upload entry', () => {
 		expect(serializedNodes).toContain('Body from uploaded file.');
 		expect(serializedNodes).not.toContain('https://example.com/article');
 	});
+
+	it('POST /upload-html for nodeseek-like rich article - keeps real images but filters svg placeholders', async () => {
+		const html = `
+			<html>
+				<head>
+					<title>Nodeseek Rich Post</title>
+					<meta property="og:url" content="https://www.nodeseek.com/post-735659-1" />
+				</head>
+				<body>
+					<article>
+						<p>Before image</p>
+						<img alt="placeholder" src="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg'></svg>" />
+						<img alt="real-image" src="data:image/webp;base64,AAAA" />
+						<p>After image</p>
+					</article>
+				</body>
+			</html>
+		`;
+
+		fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+
+		const request = createSingleFileRequest({ html, url: 'https://www.nodeseek.com/post-735659-1' });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const fnsPayload = JSON.parse(fetchMock.mock.calls[0][1].body);
+		expect(fnsPayload.content).toContain('![real-image](data:image/webp;base64,AAAA)');
+		expect(fnsPayload.content).not.toContain('data:image/svg+xml');
+	});
 });

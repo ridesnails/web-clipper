@@ -35,6 +35,7 @@ export async function parseSingleFileUpload(request) {
 export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html' }) {
 	const { document, window } = parseHTML(html);
 	const docUrl = resolveDocumentUrl(document, url, filename);
+	const preserveRichImages = shouldPreserveRichImages(docUrl);
 
 	let article = null;
 	try {
@@ -48,8 +49,8 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 	}
 
 	const title = normalizeTitle(article?.title || document.title || stripHtmlExtension(filename) || 'untitled');
-	const articleHtml = article?.content || extractReadableFallbackHtml(document) || extractBodyInnerHtml(document);
-	const markdownBody = htmlFragmentToMarkdown(articleHtml);
+	const articleHtml = preserveRichImages ? extractPreservedArticleHtml(document) || article?.content || extractBodyInnerHtml(document) : article?.content || extractReadableFallbackHtml(document) || extractBodyInnerHtml(document);
+	const markdownBody = htmlFragmentToMarkdown(articleHtml, { preserveRichImages });
 
 	if (!markdownBody.trim()) {
 		throw new Error('singlehtmlfile produced empty article');
@@ -94,14 +95,14 @@ function normalizeTitle(value) {
 		.trim();
 }
 
-function htmlFragmentToMarkdown(articleHtml) {
+function htmlFragmentToMarkdown(articleHtml, options = {}) {
 	if (!articleHtml || !articleHtml.trim()) return '';
 	const { document } = parseHTML(`<!doctype html><html><body>${articleHtml}</body></html>`);
 	const root = document.body || document.firstElementChild || document.documentElement;
 	if (!root) return '';
 	const parts = [];
 	for (const child of Array.from(root.childNodes || [])) {
-		const chunk = renderNode(child, 0);
+		const chunk = renderNode(child, 0, options);
 		if (chunk.trim()) parts.push(chunk.trim());
 	}
 	return parts.join('\n\n').trim();
@@ -131,7 +132,7 @@ function withDomGlobals(window, fn) {
 	}
 }
 
-function renderNode(node, listDepth) {
+function renderNode(node, listDepth, options) {
 	if (!node) return '';
 	if (node.nodeType === 3) {
 		return normalizeInlineText(node.textContent || '');
@@ -145,7 +146,7 @@ function renderNode(node, listDepth) {
 		case 'section':
 		case 'div':
 		case 'body':
-			return joinBlocks(node.childNodes, listDepth);
+			return joinBlocks(node.childNodes, listDepth, options);
 		case 'h1':
 		case 'h2':
 		case 'h3':
@@ -166,15 +167,16 @@ function renderNode(node, listDepth) {
 		}
 		case 'ul':
 			return Array.from(node.children)
-				.map((child) => renderListItem(child, listDepth, '-'))
+				.map((child) => renderListItem(child, listDepth, '-', options))
 				.join('\n');
 		case 'ol':
 			return Array.from(node.children)
-				.map((child, index) => renderListItem(child, listDepth, `${index + 1}.`))
+				.map((child, index) => renderListItem(child, listDepth, `${index + 1}.`, options))
 				.join('\n');
 		case 'img': {
 			const src = node.getAttribute('src') || '';
 			const alt = node.getAttribute('alt') || '';
+			if (!shouldKeepImage(src, options)) return '';
 			return src ? `![${alt}](${src})` : '';
 		}
 		case 'hr':
@@ -182,17 +184,17 @@ function renderNode(node, listDepth) {
 		case 'br':
 			return '\n';
 		default:
-			return renderInlineChildren(node);
+			return renderInlineChildren(node, options);
 	}
 }
 
-function renderListItem(node, listDepth, marker) {
-	const content = renderInlineChildren(node).trim() || joinBlocks(node.childNodes, listDepth + 1).trim();
+function renderListItem(node, listDepth, marker, options) {
+	const content = renderInlineChildren(node, options).trim() || joinBlocks(node.childNodes, listDepth + 1, options).trim();
 	const indent = '  '.repeat(listDepth);
 	return `${indent}${marker} ${content}`.trimEnd();
 }
 
-function renderInlineChildren(node) {
+function renderInlineChildren(node, options) {
 	const parts = [];
 	for (const child of Array.from(node.childNodes)) {
 		if (child.nodeType === 3) {
@@ -203,16 +205,16 @@ function renderInlineChildren(node) {
 		const tag = String(child.tagName || '').toLowerCase();
 		if (tag === 'a') {
 			const href = child.getAttribute('href') || '';
-			const text = renderInlineChildren(child) || normalizeInlineText(child.textContent || '');
+			const text = renderInlineChildren(child, options) || normalizeInlineText(child.textContent || '');
 			parts.push(href ? `[${text}](${href})` : text);
 			continue;
 		}
 		if (tag === 'strong' || tag === 'b') {
-			parts.push(`**${renderInlineChildren(child)}**`);
+			parts.push(`**${renderInlineChildren(child, options)}**`);
 			continue;
 		}
 		if (tag === 'em' || tag === 'i') {
-			parts.push(`*${renderInlineChildren(child)}*`);
+			parts.push(`*${renderInlineChildren(child, options)}*`);
 			continue;
 		}
 		if (tag === 'code') {
@@ -226,18 +228,20 @@ function renderInlineChildren(node) {
 		if (tag === 'img') {
 			const src = child.getAttribute('src') || '';
 			const alt = child.getAttribute('alt') || '';
-			if (src) parts.push(`![${alt}](${src})`);
+			if (shouldKeepImage(src, options)) {
+				parts.push(`![${alt}](${src})`);
+			}
 			continue;
 		}
 		const blockLike = ['p', 'div', 'section', 'article', 'ul', 'ol', 'pre', 'blockquote'].includes(tag);
-		parts.push(blockLike ? `\n${renderNode(child, 0)}\n` : renderInlineChildren(child));
+		parts.push(blockLike ? `\n${renderNode(child, 0, options)}\n` : renderInlineChildren(child, options));
 	}
 	return normalizeInlineText(parts.join('')).replace(/\n{3,}/g, '\n\n').trim();
 }
 
-function joinBlocks(childNodes, listDepth) {
+function joinBlocks(childNodes, listDepth, options) {
 	return Array.from(childNodes)
-		.map((child) => renderNode(child, listDepth))
+		.map((child) => renderNode(child, listDepth, options))
 		.filter((chunk) => chunk && chunk.trim())
 		.join('\n\n');
 }
@@ -254,4 +258,23 @@ function isUploadableFile(value) {
 			typeof value.size === 'number' &&
 			typeof value.text === 'function',
 	);
+}
+
+function shouldPreserveRichImages(url) {
+	try {
+		const hostname = new URL(url).hostname;
+		return hostname === 'www.nodeseek.com' || hostname === 'nodeseek.com';
+	} catch {
+		return false;
+	}
+}
+
+function extractPreservedArticleHtml(document) {
+	return document.querySelector('article, [class*="post-content"], [class*="content-item"]')?.innerHTML || '';
+}
+
+function shouldKeepImage(src, options) {
+	if (!src) return false;
+	if (src.startsWith('data:image/svg+xml')) return false;
+	return true;
 }
