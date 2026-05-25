@@ -42,6 +42,50 @@ function createExecutionContext() {
 
 async function waitOnExecutionContext() {}
 
+function jsonResponse(body, status = 200) {
+	return new Response(JSON.stringify(body), { status });
+}
+
+function fnsListResponse(list = []) {
+	return jsonResponse({
+		status: true,
+		data: {
+			list,
+			pager: { page: 1, pageSize: 10, totalRows: list.length },
+		},
+	});
+}
+
+function fnsCreateResponse(path = 'Clippings/2026-05/existing.md') {
+	return jsonResponse({ status: true, data: { path } });
+}
+
+function fnsFailureResponse(message = 'vault not found') {
+	return jsonResponse({ status: false, error: message });
+}
+
+function fnsGetNoteResponse(content, path = 'Clippings/2026-05/existing.md') {
+	return jsonResponse({
+		status: true,
+		data: {
+			path,
+			content,
+		},
+	});
+}
+
+function installFetchRouter(routes) {
+	fetchMock.mockImplementation((input, init = {}) => {
+		const url = typeof input === 'string' ? input : input.url;
+		for (const route of routes) {
+			if (route.match(url, init)) {
+				return Promise.resolve(typeof route.response === 'function' ? route.response(url, init) : route.response);
+			}
+		}
+		throw new Error(`Unexpected fetch: ${url}`);
+	});
+}
+
 beforeEach(() => {
 	originalFetch = globalThis.fetch;
 	fetchMock = vi.fn();
@@ -75,7 +119,8 @@ describe('Auth', () => {
 	it('Correct token - proceeds', async () => {
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+			.mockResolvedValueOnce(fnsListResponse([]))
+			.mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -116,7 +161,8 @@ describe('Method', () => {
 	it('POST with correct headers - proceeds', async () => {
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+			.mockResolvedValueOnce(fnsListResponse([]))
+			.mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -287,6 +333,9 @@ title: "My Title"
 url: https://example.com
 date: 2024-01-01T00:00:00.000Z
 source: clipper
+clip_method: url
+clip_count: 1
+last_clipped_at: 2024-01-01T00:00:00.000Z
 ---
 
 # My Title
@@ -334,7 +383,8 @@ describe('Integration with mocked fetch', () => {
 	it('Mock Jina success - mock FNS success - verify 200 response with ok/title/path', async () => {
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+			.mockResolvedValueOnce(fnsListResponse([]))
+			.mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -344,6 +394,7 @@ describe('Integration with mocked fetch', () => {
 		expect(response.status).toBe(200);
 		const json = await response.json();
 		expect(json.ok).toBe(true);
+		expect(json.mode).toBe('created');
 		expect(json.title).toBe('Test Article');
 		expect(json.path).toMatch(/^Clippings\/\d{4}-\d{2}\/\d{8}T\d{6}Z-Test-Article\.md$/);
 	});
@@ -372,7 +423,8 @@ describe('Integration with mocked fetch', () => {
 	it('Mock Jina success - mock FNS failure - verify 502', async () => {
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: false, error: 'vault not found' }), { status: 200 }));
+			.mockResolvedValueOnce(fnsListResponse([]))
+			.mockResolvedValueOnce(fnsFailureResponse('vault not found'));
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -380,6 +432,55 @@ describe('Integration with mocked fetch', () => {
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(502);
+	});
+
+	it('existing URL -> patch frontmatter and append update log instead of creating a new note', async () => {
+		const existingPath = 'Clippings/2026-05/existing-note.md';
+		const existingContent = `---
+title: "Test Article"
+url: https://example.com/article
+date: 2024-01-01T00:00:00.000Z
+source: clipper
+clip_method: url
+clip_count: 1
+last_clipped_at: 2024-01-01T00:00:00.000Z
+---
+
+# Test Article
+
+> [!info] 📌 信息
+> - **链接**：[原文链接](https://example.com/article)
+
+## 📄 正文
+
+old body`;
+
+		fetchMock
+			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
+			.mockResolvedValueOnce(fnsListResponse([{ path: existingPath, pathHash: 'hash-1' }]))
+			.mockResolvedValueOnce(fnsGetNoteResponse(existingContent, existingPath))
+			.mockResolvedValueOnce(jsonResponse({ status: true }))
+			.mockResolvedValueOnce(jsonResponse({ status: true }));
+
+		const request = createRequest({ url: 'https://example.com/article' });
+		const response = await worker.fetch(request, mockEnv, createExecutionContext());
+
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.ok).toBe(true);
+		expect(json.mode).toBe('updated');
+		expect(json.path).toBe(existingPath);
+		expect(fetchMock.mock.calls[3][0]).toBe(`${mockEnv.FNS_BASE}/api/note/frontmatter`);
+		expect(fetchMock.mock.calls[4][0]).toBe(`${mockEnv.FNS_BASE}/api/note/append`);
+		const patchBody = JSON.parse(fetchMock.mock.calls[3][1].body);
+		expect(patchBody.path).toBe(existingPath);
+		expect(patchBody.updates.clip_count).toBe(2);
+		expect(patchBody.updates.clip_method).toBe('url');
+		const appendBody = JSON.parse(fetchMock.mock.calls[4][1].body);
+		expect(appendBody.path).toBe(existingPath);
+		expect(appendBody.content).toContain('## 🔄 剪藏更新记录');
+		expect(appendBody.content).toContain('再次剪藏，来源 post');
+		expect(fetchMock.mock.calls.map((call) => call[0])).not.toContain(`${mockEnv.FNS_BASE}/api/note`);
 	});
 
 	it('direct handler invocation returns 405 for GET', async () => {
@@ -411,40 +512,53 @@ describe('Telegraph + Telegram integration', () => {
 			<p>HTML-only body used by Telegraph.</p>
 			<a href="/relative/path">relative link</a>
 		</article>
-	</body>
+		</body>
 </html>`;
+		const telegraphAiEnv = { ...telegraphEnv, AI_API_KEY: 'test-ai-key' };
 
-		fetchMock
-			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						choices: [
-							{
-								message: {
-									content: JSON.stringify({ summary: '一段摘要', tags: ['云服务', 'Docker Deploy'] }),
-								},
+		installFetchRouter([
+			{
+				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				response: new Response(jinaMarkdown, { status: 200 }),
+			},
+			{
+				match: (url) => url.includes('/chat/completions'),
+				response: jsonResponse({
+					choices: [
+						{
+							message: {
+								content: JSON.stringify({ summary: '一段摘要', tags: ['云服务', 'Docker Deploy'] }),
 							},
-						],
-					}),
-					{ status: 200 },
-				),
-			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
-			.mockResolvedValueOnce(new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }))
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						ok: true,
-						result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
-					}),
-					{ status: 200 },
-				),
-			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 99 } }), { status: 200 }));
+						},
+					],
+				}),
+			},
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsCreateResponse(),
+			},
+			{
+				match: (url) => url === 'https://example.com/article',
+				response: new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }),
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphAiEnv.CLIP_BOT}/sendMessage`,
+				response: jsonResponse({ ok: true, result: { message_id: 99 } }),
+			},
+		]);
 
 		const request = createRequest({ url: 'https://example.com/article' });
-		const telegraphAiEnv = { ...telegraphEnv, AI_API_KEY: 'test-ai-key' };
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, telegraphAiEnv, ctx);
 		await waitOnExecutionContext(ctx);
@@ -457,10 +571,13 @@ describe('Telegraph + Telegram integration', () => {
 		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
 		expect(json.telegramMessageId).toBe(99);
 
-		expect(fetchMock).toHaveBeenCalledTimes(6);
-		expect(fetchMock.mock.calls[3][0]).toBe('https://example.com/article');
-		expect(fetchMock.mock.calls[4][0]).toBe('https://api.telegra.ph/createPage');
-		const telegraphPayload = JSON.parse(fetchMock.mock.calls[4][1].body);
+		const telegraphCall = fetchMock.mock.calls.find((call) => call[0] === 'https://api.telegra.ph/createPage');
+		const telegramCall = fetchMock.mock.calls.find((call) => call[0] === `https://api.telegram.org/bot${telegraphAiEnv.CLIP_BOT}/sendMessage`);
+		const fnsCreateCall = fetchMock.mock.calls.find((call) => call[0] === `${mockEnv.FNS_BASE}/api/note`);
+		expect(telegraphCall).toBeTruthy();
+		expect(telegramCall).toBeTruthy();
+		expect(fnsCreateCall).toBeTruthy();
+		const telegraphPayload = JSON.parse(telegraphCall[1].body);
 		expect(telegraphPayload.title).toBe('Test Article');
 		const telegraphNodes = JSON.parse(telegraphPayload.content);
 		const serializedNodes = JSON.stringify(telegraphNodes);
@@ -468,8 +585,7 @@ describe('Telegraph + Telegram integration', () => {
 		expect(serializedNodes).toContain('https://example.com/relative/path');
 		expect(serializedNodes).not.toContain('This is the body content.');
 		expect(serializedNodes).not.toContain('ignored()');
-		expect(fetchMock.mock.calls[5][0]).toBe(`https://api.telegram.org/bot${telegraphAiEnv.CLIP_BOT}/sendMessage`);
-		const telegramPayload = JSON.parse(fetchMock.mock.calls[5][1].body);
+		const telegramPayload = JSON.parse(telegramCall[1].body);
 		expect(telegramPayload.chat_id).toBe(telegraphAiEnv.USER_ID);
 		const sentText = telegramPayload.text;
 		expect(sentText.startsWith('https://telegra.ph/Test-05-21\n\n')).toBe(true);
@@ -482,7 +598,7 @@ describe('Telegraph + Telegram integration', () => {
 			prefer_large_media: true,
 		});
 
-		const fnsPayload = JSON.parse(fetchMock.mock.calls[2][1].body);
+		const fnsPayload = JSON.parse(fnsCreateCall[1].body);
 		expect(fnsPayload.content).toContain('> [!abstract] ✨ 摘要');
 		expect(fnsPayload.content).toContain('> - **标签**：#云服务 #Docker_Deploy');
 		expect(fnsPayload.content).toContain('> [!info] 📌 信息');
@@ -501,39 +617,49 @@ Markdown Content:
 Body.`;
 		const sourceHtml = '<article><h1>HTML Article</h1><img src="/cover.jpg"><p>Body.</p></article>';
 
-		fetchMock
-			.mockResolvedValueOnce(new Response(markdownWithImage, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
-			.mockResolvedValueOnce(new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }))
-			.mockResolvedValueOnce(
-				new Response(new Uint8Array([1, 2, 3]), {
-					status: 200,
-					headers: { 'Content-Type': 'image/jpeg' },
+		installFetchRouter([
+			{
+				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				response: new Response(markdownWithImage, { status: 200 }),
+			},
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsCreateResponse(),
+			},
+			{
+				match: (url) => url === 'https://example.com/article',
+				response: new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }),
+			},
+			{
+				match: (url) => url === 'https://example.com/cover.jpg',
+				response: new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } }),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`,
+				response: jsonResponse({
+					ok: true,
+					result: {
+						message_id: 77,
+						photo: [{ file_id: 'photo-file-1', file_unique_id: 'uniq-1', width: 800 }],
+					},
 				}),
-			);
-		fetchMock
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						ok: true,
-						result: {
-							message_id: 77,
-							photo: [{ file_id: 'photo-file-1', file_unique_id: 'uniq-1', width: 800 }],
-						},
-					}),
-					{ status: 200 },
-				),
-			)
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						ok: true,
-						result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
-					}),
-					{ status: 200 },
-				),
-			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 100 } }), { status: 200 }));
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`,
+				response: jsonResponse({ ok: true, result: { message_id: 100 } }),
+			},
+		]);
 
 		const request = new Request('http://127.0.0.1:8787', {
 			method: 'POST',
@@ -548,11 +674,11 @@ Body.`;
 		const json = await response.json();
 		expect(json.fnsOk).toBe(true);
 		expect(json.telegraphOk).toBe(true);
-		expect(fetchMock.mock.calls[2][0]).toBe('https://example.com/article');
-		expect(fetchMock.mock.calls[3][0]).toBe('https://example.com/cover.jpg');
-		expect(fetchMock.mock.calls[4][0]).toBe(`https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`);
-		expect(fetchMock.mock.calls[5][0]).toBe('https://api.telegra.ph/createPage');
-		const telegraphPayload = JSON.parse(fetchMock.mock.calls[5][1].body);
+		const telegraphCall = fetchMock.mock.calls.find((call) => call[0] === 'https://api.telegra.ph/createPage');
+		expect(fetchMock.mock.calls.some((call) => call[0] === 'https://example.com/article')).toBe(true);
+		expect(fetchMock.mock.calls.some((call) => call[0] === 'https://example.com/cover.jpg')).toBe(true);
+		expect(fetchMock.mock.calls.some((call) => call[0] === `https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`)).toBe(true);
+		const telegraphPayload = JSON.parse(telegraphCall[1].body);
 		const telegraphNodes = JSON.parse(telegraphPayload.content);
 		const serializedNodes = JSON.stringify(telegraphNodes);
 		expect(serializedNodes).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1`);
@@ -561,11 +687,30 @@ Body.`;
 	});
 
 	it('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
-		fetchMock
-			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
-			.mockResolvedValueOnce(new Response('<article><p>HTML body</p></article>', { status: 200, headers: { 'Content-Type': 'text/html' } }))
-			.mockRejectedValueOnce(new Error('Telegraph API error'));
+		installFetchRouter([
+			{
+				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				response: new Response(jinaMarkdown, { status: 200 }),
+			},
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsCreateResponse(),
+			},
+			{
+				match: (url) => url === 'https://example.com/article',
+				response: new Response('<article><p>HTML body</p></article>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: () => {
+					throw new Error('Telegraph API error');
+				},
+			},
+		]);
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -583,20 +728,35 @@ Body.`;
 	it('POST / when FNS fails - Telegraph still succeeds, returns telegraphUrl without path', async () => {
 		const sourceHtml = '<article><p>HTML body</p></article>';
 
-		fetchMock
-			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: false, error: 'vault not found' }), { status: 200 }))
-			.mockResolvedValueOnce(new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }))
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						ok: true,
-						result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
-					}),
-					{ status: 200 },
-				),
-			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 101 } }), { status: 200 }));
+		installFetchRouter([
+			{
+				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				response: new Response(jinaMarkdown, { status: 200 }),
+			},
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsFailureResponse('vault not found'),
+			},
+			{
+				match: (url) => url === 'https://example.com/article',
+				response: new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }),
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`,
+				response: jsonResponse({ ok: true, result: { message_id: 101 } }),
+			},
+		]);
 
 		const request = createRequest({ url: 'https://example.com/article' });
 		const ctx = createExecutionContext();
@@ -616,7 +776,8 @@ Body.`;
 	it('POST / when FNS and Telegraph both fail - returns 502', async () => {
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: false, error: 'vault not found' }), { status: 200 }))
+			.mockResolvedValueOnce(fnsListResponse([]))
+			.mockResolvedValueOnce(fnsFailureResponse('vault not found'))
 			.mockResolvedValueOnce(new Response('<article><p>HTML body</p></article>', { status: 200, headers: { 'Content-Type': 'text/html' } }))
 			.mockRejectedValueOnce(new Error('Telegraph API error'));
 
@@ -760,16 +921,18 @@ describe('Telegram webhook clip entry', () => {
 	it('收到链接时复用剪藏流程，成功后不额外回复', async () => {
 		fetchMock
 			.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+			.mockResolvedValueOnce(fnsListResponse([]))
+			.mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createTelegramWebhookRequest(createTelegramUpdate('请剪藏 https://example.com/article'));
 		const response = await worker.fetch(request, webhookEnv, createExecutionContext());
 
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ ok: true });
-		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
 		expect(fetchMock.mock.calls[0][0]).toBe('https://r.jina.ai/https://example.com/article');
-		expect(fetchMock.mock.calls[1][0]).toBe(`${webhookEnv.FNS_BASE}/api/note`);
+		expect(fetchMock.mock.calls[1][0]).toContain(`${webhookEnv.FNS_BASE}/api/notes?`);
+		expect(fetchMock.mock.calls[2][0]).toBe(`${webhookEnv.FNS_BASE}/api/note`);
 	});
 });
 
@@ -790,7 +953,7 @@ describe('SingleFile upload entry', () => {
 	it('POST /upload-html - success writes FNS without calling Jina', async () => {
 		const html = '<html><head><title>SingleFile Title</title></head><body><article><h1>SingleFile Title</h1><p>Hello from SingleFile.</p></article></body></html>';
 
-		fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+		fetchMock.mockResolvedValueOnce(fnsListResponse([])).mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createSingleFileRequest({ html });
 		const ctx = createExecutionContext();
@@ -804,9 +967,10 @@ describe('SingleFile upload entry', () => {
 		expect(json.fnsOk).toBe(true);
 		expect(json.path).toContain('SingleFile-Title.md');
 		expect(json.telegraphOk).toBe(false);
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		expect(fetchMock.mock.calls[0][0]).toBe(`${mockEnv.FNS_BASE}/api/note`);
-		const fnsPayload = JSON.parse(fetchMock.mock.calls[0][1].body);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0][0]).toContain(`${mockEnv.FNS_BASE}/api/notes?`);
+		expect(fetchMock.mock.calls[1][0]).toBe(`${mockEnv.FNS_BASE}/api/note`);
+		const fnsPayload = JSON.parse(fetchMock.mock.calls[1][1].body);
 		expect(fnsPayload.content).toContain('Hello from SingleFile.');
 		expect(fnsPayload.content).not.toContain('Markdown Content:');
 	});
@@ -823,36 +987,41 @@ describe('SingleFile upload entry', () => {
 			PUBLIC_BASE_URL: telegraphPublicBaseUrl,
 		};
 
-		fetchMock
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }))
-			.mockResolvedValueOnce(
-				new Response(new Uint8Array([1, 2, 3]), {
-					status: 200,
-					headers: { 'Content-Type': 'image/jpeg' },
+		installFetchRouter([
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsCreateResponse(),
+			},
+			{
+				match: (url) => url === 'https://img.example.com/cover.jpg',
+				response: new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } }),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${singleFileTelegraphEnv.IMG_BOT}/sendPhoto`,
+				response: jsonResponse({
+					ok: true,
+					result: {
+						message_id: 88,
+						photo: [{ file_id: 'photo-file-2', file_unique_id: 'uniq-2', width: 800 }],
+					},
 				}),
-			)
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						ok: true,
-						result: {
-							message_id: 88,
-							photo: [{ file_id: 'photo-file-2', file_unique_id: 'uniq-2', width: 800 }],
-						},
-					}),
-					{ status: 200 },
-				),
-			)
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						ok: true,
-						result: { url: 'https://telegra.ph/Uploaded-05-21', path: 'Uploaded-05-21', title: 'Uploaded' },
-					}),
-					{ status: 200 },
-				),
-			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, result: { message_id: 102 } }), { status: 200 }));
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Uploaded-05-21', path: 'Uploaded-05-21', title: 'Uploaded' },
+				}),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendMessage`,
+				response: jsonResponse({ ok: true, result: { message_id: 102 } }),
+			},
+		]);
 
 		const request = createSingleFileRequest({ html });
 		const ctx = createExecutionContext();
@@ -863,11 +1032,13 @@ describe('SingleFile upload entry', () => {
 		const json = await response.json();
 		expect(json.fnsOk).toBe(true);
 		expect(json.telegraphOk).toBe(true);
-		expect(fetchMock.mock.calls[0][0]).toBe(`${mockEnv.FNS_BASE}/api/note`);
-		expect(fetchMock.mock.calls[1][0]).toBe('https://img.example.com/cover.jpg');
-		expect(fetchMock.mock.calls[2][0]).toBe(`https://api.telegram.org/bot${singleFileTelegraphEnv.IMG_BOT}/sendPhoto`);
-		expect(fetchMock.mock.calls[4][0]).toBe(`https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendMessage`);
-		const telegraphPayload = JSON.parse(fetchMock.mock.calls[3][1].body);
+		expect(fetchMock.mock.calls.some((call) => String(call[0]).includes(`${mockEnv.FNS_BASE}/api/notes?`))).toBe(true);
+		expect(fetchMock.mock.calls.some((call) => call[0] === `${mockEnv.FNS_BASE}/api/note`)).toBe(true);
+		expect(fetchMock.mock.calls.some((call) => call[0] === 'https://img.example.com/cover.jpg')).toBe(true);
+		expect(fetchMock.mock.calls.some((call) => call[0] === `https://api.telegram.org/bot${singleFileTelegraphEnv.IMG_BOT}/sendPhoto`)).toBe(true);
+		expect(fetchMock.mock.calls.some((call) => call[0] === `https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendMessage`)).toBe(true);
+		const telegraphCall = fetchMock.mock.calls.find((call) => call[0] === 'https://api.telegra.ph/createPage');
+		const telegraphPayload = JSON.parse(telegraphCall[1].body);
 		const serializedNodes = JSON.stringify(JSON.parse(telegraphPayload.content));
 		expect(serializedNodes).toContain('Body from uploaded file.');
 		expect(serializedNodes).not.toContain('https://example.com/article');
@@ -891,7 +1062,7 @@ describe('SingleFile upload entry', () => {
 			</html>
 		`;
 
-		fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+		fetchMock.mockResolvedValueOnce(fnsListResponse([])).mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createSingleFileRequest({ html, url: 'https://www.nodeseek.com/post-735659-1' });
 		const ctx = createExecutionContext();
@@ -899,7 +1070,7 @@ describe('SingleFile upload entry', () => {
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
-		const fnsPayload = JSON.parse(fetchMock.mock.calls[0][1].body);
+		const fnsPayload = JSON.parse(fetchMock.mock.calls[1][1].body);
 		expect(fnsPayload.content).toContain('![real-image](data:image/webp;base64,AAAA)');
 		expect(fnsPayload.content).not.toContain('data:image/svg+xml');
 	});
@@ -936,7 +1107,8 @@ describe('SingleFile upload entry', () => {
 					{ status: 200 },
 				),
 			)
-			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+			.mockResolvedValueOnce(fnsListResponse([]))
+			.mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createSingleFileRequest({ html });
 		const ctx = createExecutionContext();
@@ -944,10 +1116,10 @@ describe('SingleFile upload entry', () => {
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
-		const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
+		const payload = JSON.parse(fetchMock.mock.calls[2][1].body);
 		expect(payload.content).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=inline-photo-file`);
 		expect(payload.content).not.toContain('data:image/png;base64,QUJDRA==');
-		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock).toHaveBeenCalledTimes(3);
 	});
 
 	it('POST /upload-html for nodeseek-like page - chooses the longest post-content block', async () => {
@@ -968,7 +1140,7 @@ describe('SingleFile upload entry', () => {
 			</html>
 		`;
 
-		fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+		fetchMock.mockResolvedValueOnce(fnsListResponse([])).mockResolvedValueOnce(fnsCreateResponse());
 
 		const request = createSingleFileRequest({ html, url: 'https://www.nodeseek.com/post-735659-1' });
 		const ctx = createExecutionContext();
@@ -976,7 +1148,7 @@ describe('SingleFile upload entry', () => {
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(200);
-		const fnsPayload = JSON.parse(fetchMock.mock.calls[0][1].body);
+		const fnsPayload = JSON.parse(fetchMock.mock.calls[1][1].body);
 		expect(fnsPayload.content).toContain('Main article first paragraph.');
 		expect(fnsPayload.content).toContain('Main article second paragraph with more content.');
 		expect(fnsPayload.content).toContain('![real-image](data:image/webp;base64,BBBB)');

@@ -20,6 +20,12 @@
 2. 生成 Markdown 和 frontmatter
 3. `FNS` 与 `Telegraph / Telegram` 并行执行
 
+同一条 URL 再次剪藏时，`FNS` 不会重复新建笔记，而是：
+
+1. 先查找已有笔记
+2. 命中后更新 frontmatter
+3. 追加一条剪藏更新记录
+
 如果你只想快速开始：
 
 1. 配好 `FNS_BASE`、`FNS_VAULT`、`FNS_TOKEN`
@@ -106,6 +112,7 @@
 	"ok": true,
 	"title": "Article Title",
 	"fnsOk": true,
+	"mode": "created",
 	"path": "Clippings/2026-05/Article-Title.md",
 	"telegraphOk": true,
 	"telegraphUrl": "https://telegra.ph/Article-Title-05-21",
@@ -114,6 +121,7 @@
 ```
 
 - `fnsOk` 表示 FNS 是否成功。
+- `mode` 取值为 `created` 或 `updated`。
 - `telegraphOk` 表示 Telegraph / Telegram 是否成功。
 - `path` 仅在 FNS 成功时返回。
 - `telegraphUrl` 和 `telegramMessageId` 仅在 Telegraph / Telegram 成功时返回。
@@ -191,6 +199,14 @@
 5. FNS 和 Telegraph / Telegram 并行执行
 6. 任一链路成功都尽量返回结果
 
+### URL 去重与软更新
+
+`FNS` 是主存储，所以 Worker 会优先在 `FNS` 里按 URL 查重。
+
+- 首次剪藏：创建新笔记，返回 `mode: "created"`
+- 再次剪藏同一 URL：不覆盖正文，不新建第二篇，返回 `mode: "updated"`
+- 软更新内容：更新 `last_clipped_at`、`clip_count`、`clip_method`，并在文末追加一条剪藏记录
+
 ## 响应与输出
 
 每次剪藏在 FNS Vault 的 `Clippings/YYYY-MM/` 目录下生成一个 Markdown 文件：
@@ -201,6 +217,9 @@ title: "服务器与网站的开荒入坑"
 url: https://blog.huan666.de/posts/server-website-getting-started
 date: 2026-05-14T15:18:39.538Z
 source: clipper
+clip_method: url
+clip_count: 1
+last_clipped_at: 2026-05-14T15:18:39.538Z
 summary: "一段可选 AI 摘要"
 ---
 
@@ -217,6 +236,14 @@ summary: "一段可选 AI 摘要"
 ## 📄 正文
 
 （jina 抽取出的正文 markdown，元信息头已剥离）
+```
+
+如果后续再次剪藏同一 URL，Worker 会在原笔记末尾追加：
+
+```markdown
+## 🔄 剪藏更新记录
+
+- 2026-05-26 10:00:00 再次剪藏，来源 post
 ```
 
 ### CORS

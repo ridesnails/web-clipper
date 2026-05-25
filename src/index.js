@@ -93,7 +93,12 @@ async function handleJsonClipRequest(request, env) {
 
 	try {
 		const article = await fetchArticleFromUrl(url, env);
-		return await clipArticle({ requestUrl: request.url, article, env });
+		return await clipArticle({
+			requestUrl: request.url,
+			article,
+			env,
+			clipMethod: normalizeClipMethod(request.headers.get('X-Clip-Method')),
+		});
 	} catch (e) {
 		console.error('Jina fetch failed:', url, e.message);
 		return Response.json({ error: `Jina error: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
@@ -103,7 +108,7 @@ async function handleJsonClipRequest(request, env) {
 async function handleSingleFileClipRequest(request, env) {
 	try {
 		const article = await parseSingleFileUpload(request);
-		return await clipArticle({ requestUrl: request.url, article, env });
+		return await clipArticle({ requestUrl: request.url, article, env, clipMethod: 'singlefile' });
 	} catch (e) {
 		return Response.json({ error: e.message }, { status: 400, headers: corsHeaders(env) });
 	}
@@ -146,7 +151,7 @@ async function fetchArticleFromUrl(url, env) {
 	};
 }
 
-async function clipArticle({ requestUrl, article, env }) {
+async function clipArticle({ requestUrl, article, env, clipMethod = 'url' }) {
 	let { title, url, markdownBody, sourceHtml } = article;
 	const slug = makeSlug(title);
 	const now = new Date();
@@ -188,11 +193,14 @@ async function clipArticle({ requestUrl, article, env }) {
 		body: markdownBody,
 		summary,
 		tags,
+		clipMethod,
+		clipCount: 1,
+		lastClippedAt: now.toISOString(),
 	});
 
 	const telegraphEnabled = Boolean(env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID));
 	const [fnsResult, telegraphResult] = await Promise.allSettled([
-		writeToFns({ path, content, env }),
+		writeToFns({ path, content, env, url, summary, tags, clipMethod, clippedAt: now }),
 		telegraphEnabled
 			? pushTelegraphAndTelegram({ requestUrl, articleUrl: url, title, cleanBody: markdownBody, sourceHtml, summary, tags, env })
 			: Promise.resolve(null),
@@ -223,13 +231,15 @@ async function clipArticle({ requestUrl, article, env }) {
 		console.error('Telegraph/Telegram push failed:', telegraphError);
 	}
 
-	console.log('Clipped:', title, '->', path);
+	const fnsData = fnsOk ? fnsResult.value : null;
+	console.log('Clipped:', title, '->', fnsData?.path || path, fnsData?.mode || 'created');
 	return Response.json(
 		{
 			ok: true,
 			title,
 			fnsOk,
-			path: fnsOk ? path : undefined,
+			mode: fnsOk ? fnsData.mode : undefined,
+			path: fnsOk ? fnsData.path : undefined,
 			telegraphOk,
 			telegraphUrl: telegraphData.telegraphUrl || undefined,
 			telegramMessageId: telegraphData.telegramMessageId || undefined,
@@ -238,7 +248,39 @@ async function clipArticle({ requestUrl, article, env }) {
 	);
 }
 
-async function writeToFns({ path, content, env }) {
+async function writeToFns({ path, content, env, url, summary, tags, clipMethod, clippedAt }) {
+	const existing = await findExistingNoteByUrl({ url, env });
+	if (!existing) {
+		await createFnsNote({ path, content, env });
+		return { mode: 'created', path };
+	}
+
+	const nextClipCount = extractClipCount(existing.content) + 1;
+	const updates = {
+		last_clipped_at: clippedAt.toISOString(),
+		clip_count: nextClipCount,
+		clip_method: clipMethod,
+	};
+	if (summary) {
+		updates.summary = summary;
+	}
+	if (tags.length > 0) {
+		updates.tags = tags;
+	}
+	await patchFnsFrontmatter({
+		path: existing.path,
+		updates,
+		env,
+	});
+	await appendFnsNote({
+		path: existing.path,
+		content: buildClipUpdateAppend(existing.content, clippedAt, clipMethod),
+		env,
+	});
+	return { mode: 'updated', path: existing.path };
+}
+
+async function createFnsNote({ path, content, env }) {
 	const fnsRes = await fetch(`${env.FNS_BASE}/api/note`, {
 		method: 'POST',
 		headers: {
@@ -252,11 +294,148 @@ async function writeToFns({ path, content, env }) {
 		}),
 	});
 
-	const fnsData = await fnsRes.json();
-	if (!fnsData.status) {
-		throw new Error(JSON.stringify(fnsData));
+	const fnsData = await safeJson(fnsRes);
+	if (!fnsRes.ok || !fnsData?.status) {
+		throw new Error(JSON.stringify(fnsData || { status: false, message: `HTTP ${fnsRes.status}` }));
 	}
-	return { path };
+	return fnsData.data || { path };
+}
+
+async function findExistingNoteByUrl({ url, env }) {
+	const params = new URLSearchParams({
+		vault: env.FNS_VAULT,
+		page: '1',
+		pageSize: '10',
+		keyword: url,
+		searchMode: 'content',
+		searchContent: 'true',
+		sortBy: 'mtime',
+		sortOrder: 'desc',
+	});
+	const res = await fetch(`${env.FNS_BASE}/api/notes?${params.toString()}`, {
+		headers: {
+			Authorization: `Bearer ${env.FNS_TOKEN}`,
+		},
+	});
+	const data = await safeJson(res);
+	if (!res.ok || !data?.status) {
+		throw new Error(JSON.stringify(data || { status: false, message: `HTTP ${res.status}` }));
+	}
+	const list = Array.isArray(data?.data?.list) ? data.data.list : [];
+	for (const item of list) {
+		if (typeof item?.path !== 'string' || !item.path) continue;
+		try {
+			const note = await getFnsNote({ path: item.path, env });
+			if (noteContainsUrl(note.content, url)) {
+				return { path: item.path, pathHash: item.pathHash || '', content: note.content };
+			}
+		} catch (e) {
+			console.warn('Skip FNS dedupe candidate:', item.path, e.message);
+		}
+	}
+	return null;
+}
+
+async function getFnsNote({ path, env }) {
+	const params = new URLSearchParams({
+		vault: env.FNS_VAULT,
+		path,
+	});
+	const res = await fetch(`${env.FNS_BASE}/api/note?${params.toString()}`, {
+		headers: {
+			Authorization: `Bearer ${env.FNS_TOKEN}`,
+		},
+	});
+	const data = await safeJson(res);
+	if (!res.ok || !data?.status || !data?.data?.content) {
+		throw new Error(JSON.stringify(data || { status: false, message: `HTTP ${res.status}` }));
+	}
+	return data.data;
+}
+
+async function patchFnsFrontmatter({ path, updates, env }) {
+	const res = await fetch(`${env.FNS_BASE}/api/note/frontmatter`, {
+		method: 'PATCH',
+		headers: {
+			Authorization: `Bearer ${env.FNS_TOKEN}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			vault: env.FNS_VAULT,
+			path,
+			updates,
+		}),
+	});
+	const data = await safeJson(res);
+	if (!res.ok || !data?.status) {
+		throw new Error(JSON.stringify(data || { status: false, message: `HTTP ${res.status}` }));
+	}
+}
+
+async function appendFnsNote({ path, content, env }) {
+	const res = await fetch(`${env.FNS_BASE}/api/note/append`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${env.FNS_TOKEN}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			vault: env.FNS_VAULT,
+			path,
+			content,
+		}),
+	});
+	const data = await safeJson(res);
+	if (!res.ok || !data?.status) {
+		throw new Error(JSON.stringify(data || { status: false, message: `HTTP ${res.status}` }));
+	}
+}
+
+async function safeJson(response) {
+	try {
+		return await response.json();
+	} catch {
+		return null;
+	}
+}
+
+function normalizeClipMethod(value) {
+	return ['url', 'singlefile', 'telegram'].includes(value) ? value : 'url';
+}
+
+function extractClipCount(content) {
+	const match = String(content || '').match(/^clip_count:\s*(\d+)\s*$/m);
+	return match ? Number(match[1]) || 0 : 0;
+}
+
+function buildClipUpdateAppend(existingContent, clippedAt, clipMethod) {
+	const line = `- ${formatClipLogTime(clippedAt)} 再次剪藏，来源 ${describeClipMethod(clipMethod)}`;
+	if (String(existingContent || '').includes('## 🔄 剪藏更新记录')) {
+		return `\n${line}`;
+	}
+	return `\n\n## 🔄 剪藏更新记录\n\n${line}`;
+}
+
+function formatClipLogTime(date) {
+	const china = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+	const year = china.getUTCFullYear();
+	const month = String(china.getUTCMonth() + 1).padStart(2, '0');
+	const day = String(china.getUTCDate()).padStart(2, '0');
+	const hour = String(china.getUTCHours()).padStart(2, '0');
+	const minute = String(china.getUTCMinutes()).padStart(2, '0');
+	const second = String(china.getUTCSeconds()).padStart(2, '0');
+	return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
+}
+
+function describeClipMethod(clipMethod) {
+	if (clipMethod === 'telegram') return 'telegram';
+	if (clipMethod === 'singlefile') return 'singlefile';
+	return 'post';
+}
+
+function noteContainsUrl(content, url) {
+	const text = String(content || '');
+	return text.includes(`url: ${url}`) || text.includes(`[原文链接](${url})`);
 }
 
 async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, sourceHtml, summary, tags, env }) {
@@ -384,6 +563,7 @@ async function handleTelegramWebhook(request, env) {
 			headers: {
 				Authorization: `Bearer ${env.API_KEY}`,
 				'Content-Type': 'application/json',
+				'X-Clip-Method': 'telegram',
 			},
 			body: JSON.stringify({ url }),
 		});
@@ -535,12 +715,21 @@ function cleanJinaBody(md) {
 }
 
 // 拼带 frontmatter 的 markdown 文件
-function buildNote({ title, url, date, body, summary, tags = [] }) {
+function buildNote({ title, url, date, body, summary, tags = [], clipMethod = 'url', clipCount = 1, lastClippedAt = date }) {
 	const safeTitle = yamlEscape(title);
 	const normalizedBody = stripLeadingDuplicateTitle(body, title);
 	const hostname = getHostname(url);
 	const tagLine = formatTagLine(tags);
-	const frontmatter = ['---', `title: "${safeTitle}"`, `url: ${url}`, `date: ${date}`, 'source: clipper'];
+	const frontmatter = [
+		'---',
+		`title: "${safeTitle}"`,
+		`url: ${url}`,
+		`date: ${date}`,
+		'source: clipper',
+		`clip_method: ${clipMethod}`,
+		`clip_count: ${clipCount}`,
+		`last_clipped_at: ${lastClippedAt}`,
+	];
 	if (tags.length > 0) {
 		frontmatter.push('tags:');
 		for (const tag of tags) {
