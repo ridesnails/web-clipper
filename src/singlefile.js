@@ -36,6 +36,7 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 	const { document, window } = parseHTML(html);
 	const docUrl = resolveDocumentUrl(document, url, filename);
 	const preserveRichImages = shouldPreserveRichImages(docUrl);
+	const imageVariableMap = extractSingleFileImageVariableMap(document);
 
 	let article = null;
 	try {
@@ -50,7 +51,7 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 
 	const title = normalizeTitle(article?.title || document.title || stripHtmlExtension(filename) || 'untitled');
 	const articleHtml = preserveRichImages ? extractPreservedArticleHtml(document, docUrl) || article?.content || extractBodyInnerHtml(document) : article?.content || extractReadableFallbackHtml(document) || extractBodyInnerHtml(document);
-	const markdownBody = htmlFragmentToMarkdown(articleHtml, { preserveRichImages });
+	const markdownBody = htmlFragmentToMarkdown(articleHtml, { preserveRichImages, imageVariableMap });
 
 	if (!markdownBody.trim()) {
 		throw new Error('singlehtmlfile produced empty article');
@@ -174,7 +175,7 @@ function renderNode(node, listDepth, options) {
 				.map((child, index) => renderListItem(child, listDepth, `${index + 1}.`, options))
 				.join('\n');
 		case 'img': {
-			const src = node.getAttribute('src') || '';
+			const src = resolveImageSource(node, options);
 			const alt = node.getAttribute('alt') || '';
 			if (!shouldKeepImage(src, options)) return '';
 			return src ? `![${alt}](${src})` : '';
@@ -226,7 +227,7 @@ function renderInlineChildren(node, options) {
 			continue;
 		}
 		if (tag === 'img') {
-			const src = child.getAttribute('src') || '';
+			const src = resolveImageSource(child, options);
 			const alt = child.getAttribute('alt') || '';
 			if (shouldKeepImage(src, options)) {
 				parts.push(`![${alt}](${src})`);
@@ -283,6 +284,32 @@ function shouldKeepImage(src, options) {
 	if (!src) return false;
 	if (src.startsWith('data:image/svg+xml')) return false;
 	return true;
+}
+
+function extractSingleFileImageVariableMap(document) {
+	const map = new Map();
+	for (const styleEl of Array.from(document.querySelectorAll('style'))) {
+		const css = styleEl.textContent || '';
+		const regex = /--(sf-img-\d+)\s*:\s*url\((["']?)(.*?)\2\)/g;
+		let match;
+		while ((match = regex.exec(css)) !== null) {
+			map.set(`--${match[1]}`, match[3]);
+		}
+	}
+	return map;
+}
+
+function resolveImageSource(node, options) {
+	const directSrc = node.getAttribute('src') || '';
+	if (directSrc && !directSrc.startsWith('data:image/svg+xml')) {
+		return directSrc;
+	}
+
+	const style = node.getAttribute('style') || '';
+	const varMatch = style.match(/background-image:\s*var\((--sf-img-\d+)\)/);
+	if (!varMatch) return directSrc;
+
+	return options?.imageVariableMap?.get(varMatch[1]) || directSrc;
 }
 
 function selectBestHtmlBlock(nodeList) {
