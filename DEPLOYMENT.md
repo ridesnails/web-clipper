@@ -434,6 +434,7 @@ curl -X POST https://web-clipper.<your>.workers.dev \
 - 登录态页面
 - Jina 抓不到的页面
 - 希望浏览器端先完整保存页面再上传
+- 论坛贴、公众号、图片较多的页面
 
 配置完成后，SingleFile 会把完整 HTML 直接上传到：
 
@@ -447,6 +448,8 @@ https://web-clipper.<your>.workers.dev/upload-html
 - `multipart/form-data`
 - 文件字段名：`singlehtmlfile`
 - URL 字段名：`url`
+
+这个入口会尽量保留正文中的真实图片，并过滤明显的占位 SVG 图，所以对论坛贴、公众号和富文本页面通常比 URL 入口更稳。
 
 ### 7.4 客户端配置参考
 
