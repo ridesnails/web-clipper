@@ -1,6 +1,7 @@
 import { sendPhoto, sendMessage, getFile } from './telegram.js';
 import { parseSingleFileUpload } from './singlefile.js';
 import { createPage, htmlToTelegraphNodes } from './telegraph.js';
+import { marked } from 'marked';
 
 // CORS 响应头
 function corsHeaders(env) {
@@ -190,7 +191,9 @@ async function clipArticle({ requestUrl, article, env }) {
 		tags,
 	});
 
-	const telegraphEnabled = Boolean(env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID));
+	const telegraphEnabled = Boolean(
+		env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID)
+	);
 	const [fnsResult, telegraphResult] = await Promise.allSettled([
 		writeToFns({ path, content, env }),
 		telegraphEnabled
@@ -209,7 +212,10 @@ async function clipArticle({ requestUrl, article, env }) {
 		}
 		const telegraphError =
 			telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
-		return Response.json({ error: `FNS failed: ${fnsError}; Telegraph failed: ${telegraphError}` }, { status: 502, headers: corsHeaders(env) });
+		return Response.json(
+			{ error: `FNS failed: ${fnsError}; Telegraph failed: ${telegraphError}` },
+			{ status: 502, headers: corsHeaders(env) }
+		);
 	}
 
 	if (!fnsOk) {
@@ -234,7 +240,7 @@ async function clipArticle({ requestUrl, article, env }) {
 			telegraphUrl: telegraphData.telegraphUrl || undefined,
 			telegramMessageId: telegraphData.telegramMessageId || undefined,
 		},
-		{ headers: corsHeaders(env) },
+		{ headers: corsHeaders(env) }
 	);
 }
 
@@ -263,12 +269,15 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 	// Telegraph 内容优先使用 SingleFile 上传的 HTML；否则回退到原网页 HTML；再不行才回退到 Jina Markdown。
 	const uploadedHtml = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, articleUrl) : '';
 	const fetchedHtml = uploadedHtml ? '' : await fetchSourceHtml(articleUrl);
-	const telegraphHtmlSource = uploadedHtml || (fetchedHtml ? prepareSourceHtmlForTelegraph(fetchedHtml, articleUrl) : markdownBodyToHtml(cleanBody));
+	const telegraphHtmlSource =
+		uploadedHtml ||
+		(fetchedHtml ? prepareSourceHtmlForTelegraph(fetchedHtml, articleUrl) : marked.parse(String(cleanBody || ''), { async: false }));
 
 	// 从 HTML 中提取图片 URL；HTML 获取失败时降级提取 Markdown 图片。
-	const imageItems = uploadedHtml || fetchedHtml
-		? extractHtmlImageUrls(uploadedHtml || fetchedHtml, articleUrl)
-		: extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
+	const imageItems =
+		uploadedHtml || fetchedHtml
+			? extractHtmlImageUrls(uploadedHtml || fetchedHtml, articleUrl)
+			: extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
 
 	// 下载每张图片并上传到 Telegram 频道，收集 file_id
 	const imageMappings = [];
@@ -311,7 +320,9 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 	const summaryBlock = summary ? `\n\n${escapeHtml(summary)}` : '';
 	const tagLine = formatTagLine(tags);
 	const tagBlock = tagLine ? `\n\n${escapeHtml(tagLine)}` : '';
-	const msgText = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(title)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}\n\n#webclipper`;
+	const msgText = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(
+		title
+	)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}\n\n#webclipper`;
 	const msgResult = await sendMessage(msgText, env.USER_ID || env.TELEGRAM_CHAT_ID, env, { linkPreviewUrl: telegraphUrl });
 	const telegramMessageId = msgResult.message_id;
 
@@ -603,29 +614,16 @@ function stripUnsafeHtml(html) {
 }
 
 function absolutizeHtmlUrls(html, baseUrl) {
-	return String(html || '').replace(/\b(href|src)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'<>]+))/gi, (match, attr, wrapped, doubleQuoted, singleQuoted, unquoted) => {
-		const raw = doubleQuoted ?? singleQuoted ?? unquoted ?? '';
-		const absolute = resolveUrl(raw, baseUrl);
-		if (!absolute) return match;
-		const quote = wrapped.startsWith("'") ? "'" : '"';
-		return `${attr}=${quote}${escapeHtmlAttr(absolute)}${quote}`;
-	});
-}
-
-function markdownBodyToHtml(markdown) {
-	return String(markdown || '')
-		.split(/\n{2,}/)
-		.map((block) => {
-			const trimmed = block.trim();
-			if (!trimmed) return '';
-			const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
-			if (heading) return `<h3>${escapeHtml(heading[2])}</h3>`;
-			const image = trimmed.match(/^!\[[^\]]*\]\((https?:\/\/[^)\s]+)\)$/);
-			if (image) return `<img src="${escapeHtmlAttr(image[1])}">`;
-			return `<p>${escapeHtml(trimmed).replace(/\n/g, '<br>')}</p>`;
-		})
-		.filter(Boolean)
-		.join('\n');
+	return String(html || '').replace(
+		/\b(href|src)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'<>]+))/gi,
+		(match, attr, wrapped, doubleQuoted, singleQuoted, unquoted) => {
+			const raw = doubleQuoted ?? singleQuoted ?? unquoted ?? '';
+			const absolute = resolveUrl(raw, baseUrl);
+			if (!absolute) return match;
+			const quote = wrapped.startsWith("'") ? "'" : '"';
+			return `${attr}=${quote}${escapeHtmlAttr(absolute)}${quote}`;
+		}
+	);
 }
 
 function buildTelegraphHtml({ body, summary, tags = [] }) {
@@ -794,7 +792,6 @@ export {
 	escapeHtml,
 	buildTelegraphHtml,
 	prepareSourceHtmlForTelegraph,
-	markdownBodyToHtml,
 };
 
 // 过滤掉 Markdown 中空文本的链接（Jina 提取的 heading anchor links）
