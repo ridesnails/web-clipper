@@ -451,6 +451,9 @@ https://web-clipper.<your>.workers.dev/upload-html
 
 这个入口会尽量保留正文中的真实图片，并过滤明显的占位 SVG 图，所以对论坛贴、公众号和富文本页面通常比 URL 入口更稳。
 
+另外，SingleFile 导出的 `data:image/...` 内联图片不会直接以 base64 形式写进 Markdown。
+Worker 会先按现有图片链路把这些图片外部化，再在笔记里写成 `/image-proxy?file_id=...` 形式的链接。
+
 ### 7.4 客户端配置参考
 
 参见主 README 的「使用示例」一节。最常用的三个：

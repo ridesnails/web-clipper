@@ -178,6 +178,7 @@
 - 直接从上传 HTML 中提取正文，再走同一条剪藏主链路
 - Telegraph 也会优先复用这份上传 HTML，而不是重新抓网页
 - 对论坛贴、公众号和图片较多的页面，会尽量保留正文中的真实图片，并过滤明显的占位 SVG 图
+- 对 `data:image/...` 这类 SingleFile 内联图片，会按现有图片链路外部化成 Worker `/image-proxy` 链接，而不是把 base64 直接写进 Markdown
 
 ## 剪藏主链路
 
