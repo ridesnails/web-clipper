@@ -227,4 +227,26 @@ describe('markdownToTelegraphNodes', () => {
 		const codeText = nodes[0].children[0].children[0];
 		expect(codeText).toContain('mkdir cloudflare-imgbed\ncd cloudflare-imgbed');
 	});
+
+	it('HTML 高亮代码块转为 pre > code，去掉行号噪音', () => {
+		const html = `
+			<div class="highlight">
+				<table>
+					<tr>
+						<td class="gutter"><pre>1
+2</pre></td>
+						<td class="code"><pre><code class="language-js">const a = 1;
+console.log(a);</code></pre></td>
+					</tr>
+				</table>
+			</div>
+		`;
+
+		const nodes = htmlToTelegraphNodes(html);
+		expect(nodes).toHaveLength(1);
+		expect(nodes[0].tag).toBe('pre');
+		expect(nodes[0].children[0].tag).toBe('code');
+		expect(nodes[0].children[0].children[0]).toContain('const a = 1;\nconsole.log(a);');
+		expect(nodes[0].children[0].children[0]).not.toContain('1\n2');
+	});
 });

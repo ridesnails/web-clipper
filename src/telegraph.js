@@ -1,6 +1,7 @@
 // Telegraph API 封装与 HTML/Markdown → Telegraph Node 转换
 import { marked } from 'marked';
 import { parseHTML } from 'linkedom';
+import { normalizeCodeBlocksHtml } from './code-blocks.js';
 
 const SUPPORTED_TAGS = new Set(['a', 'aside', 'b', 'blockquote', 'br', 'code', 'em', 'figcaption', 'figure', 'h3', 'h4', 'hr', 'i', 'iframe', 'img', 'li', 'ol', 'p', 'pre', 's', 'strong', 'u', 'ul', 'video']);
 const VOID_TAGS = new Set(['br', 'hr', 'img', 'iframe', 'video']);
@@ -62,7 +63,8 @@ export function markdownToTelegraphNodes(markdown) {
  */
 export function htmlToTelegraphNodes(html) {
 	if (!html || !html.trim()) return [];
-	const { document } = parseHTML('<html><body><div id="root">' + html + '</div></body></html>');
+	const normalizedHtml = normalizeCodeBlocksHtml(html);
+	const { document } = parseHTML('<html><body><div id="root">' + normalizedHtml + '</div></body></html>');
 	const root = document.getElementById('root');
 	const nodes = [];
 	for (const child of root.childNodes) {
@@ -202,11 +204,16 @@ function isSafeUrl(url) {
 	return typeof url === 'string' && (/^https?:\/\//i.test(url) || url.startsWith('/embed/'));
 }
 
-function compactNodes(nodes) {
+function compactNodes(nodes, parentTag = '') {
 	return nodes
 		.map((node) => {
-			if (typeof node === 'string') return node.trim() ? node : null;
-			if (node.children) node.children = compactNodes(node.children);
+			if (typeof node === 'string') {
+				if (parentTag === 'pre' || parentTag === 'code') {
+					return node.length ? node : null;
+				}
+				return node.trim() ? node : null;
+			}
+			if (node.children) node.children = compactNodes(node.children, node.tag);
 			if (!VOID_TAGS.has(node.tag) && (!node.children || node.children.length === 0) && BLOCK_TAGS.has(node.tag)) return null;
 			return node;
 		})

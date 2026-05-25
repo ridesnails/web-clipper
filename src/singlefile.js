@@ -1,5 +1,7 @@
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
+import TurndownService from 'turndown';
+import { fenceCodeBlock, extractCodeLanguage, normalizeCodeBlocksHtml } from './code-blocks.js';
 
 const MAX_HTML_SIZE = 10 * 1024 * 1024;
 
@@ -43,7 +45,8 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 	try {
 		article = withDomGlobals(window, () =>
 			new Readability(document, {
-				keepClasses: false,
+				// 保留代码高亮类名，方便后续恢复 fenced code 的语言标记
+				keepClasses: true,
 			}).parse(),
 		);
 	} catch {
@@ -99,15 +102,13 @@ function normalizeTitle(value) {
 
 function htmlFragmentToMarkdown(articleHtml, options = {}) {
 	if (!articleHtml || !articleHtml.trim()) return '';
-	const { document } = parseHTML(`<!doctype html><html><body>${articleHtml}</body></html>`);
+	const normalizedHtml = normalizeCodeBlocksHtml(articleHtml);
+	const { document } = parseHTML(`<!doctype html><html><body>${normalizedHtml}</body></html>`);
 	const root = document.body || document.firstElementChild || document.documentElement;
 	if (!root) return '';
-	const parts = [];
-	for (const child of Array.from(root.childNodes || [])) {
-		const chunk = renderNode(child, 0, options);
-		if (chunk.trim()) parts.push(chunk.trim());
-	}
-	return parts.join('\n\n').trim();
+
+	const turndown = createTurndownService(options);
+	return turndown.turndown(root.innerHTML || normalizedHtml).trim();
 }
 
 function withDomGlobals(window, fn) {
@@ -134,122 +135,69 @@ function withDomGlobals(window, fn) {
 	}
 }
 
-function renderNode(node, listDepth, options) {
-	if (!node) return '';
-	if (node.nodeType === 3) {
-		return normalizeInlineText(node.textContent || '');
-	}
-	if (node.nodeType !== 1) return '';
+function normalizeInlineText(text) {
+	return String(text || '').replace(/\s+/g, ' ');
+}
 
-	const tag = String(node.tagName || '').toLowerCase();
-	switch (tag) {
-		case 'article':
-		case 'main':
-		case 'section':
-		case 'div':
-		case 'body':
-			return joinBlocks(node.childNodes, listDepth, options);
-		case 'h1':
-		case 'h2':
-		case 'h3':
-		case 'h4':
-		case 'h5':
-		case 'h6':
-			return `${'#'.repeat(Number(tag[1]))} ${renderInlineChildren(node)}`.trim();
-		case 'p':
-			return renderInlineChildren(node);
-		case 'blockquote':
-			return renderInlineChildren(node)
-				.split('\n')
-				.map((line) => `> ${line}`.trimEnd())
-				.join('\n');
-		case 'pre': {
-			const code = node.textContent || '';
-			return `\`\`\`\n${code.trimEnd()}\n\`\`\``;
-		}
-		case 'ul':
-			return Array.from(node.children)
-				.map((child) => renderListItem(child, listDepth, '-', options))
-				.join('\n');
-		case 'ol':
-			return Array.from(node.children)
-				.map((child, index) => renderListItem(child, listDepth, `${index + 1}.`, options))
-				.join('\n');
-		case 'img': {
+function createTurndownService(options) {
+	const service = new TurndownService({
+		codeBlockStyle: 'fenced',
+		headingStyle: 'atx',
+		bulletListMarker: '-',
+		emDelimiter: '*',
+		strongDelimiter: '**',
+		br: '\n',
+	});
+
+	service.addRule('preserve-pre-code', {
+		filter(node) {
+			return node.nodeName === 'PRE';
+		},
+		replacement(content, node) {
+			const codeNode = node.querySelector?.('code') || node;
+			return `\n\n${fenceCodeBlock(codeNode.textContent || '', extractCodeLanguage(codeNode))}\n\n`;
+		},
+	});
+
+	service.addRule('inline-code', {
+		filter(node) {
+			return node.nodeName === 'CODE' && node.parentNode?.nodeName !== 'PRE';
+		},
+		replacement(content, node) {
+			const text = String(node.textContent || '').replace(/\r\n/g, ' ').replace(/\n/g, ' ');
+			if (!text) return '';
+			const maxTicks = Math.max(0, ...Array.from(text.matchAll(/`+/g), (match) => match[0].length));
+			const fence = '`'.repeat(Math.max(1, maxTicks + 1));
+			return `${fence}${text}${fence}`;
+		},
+	});
+
+	service.addRule('keep-images', {
+		filter(node) {
+			return node.nodeName === 'IMG';
+		},
+		replacement(content, node) {
 			const src = resolveImageSource(node, options);
 			const alt = node.getAttribute('alt') || '';
 			if (!shouldKeepImage(src, options)) return '';
 			return src ? `![${alt}](${src})` : '';
-		}
-		case 'hr':
-			return '---';
-		case 'br':
-			return '\n';
-		default:
-			return renderInlineChildren(node, options);
-	}
-}
+		},
+	});
 
-function renderListItem(node, listDepth, marker, options) {
-	const content = renderInlineChildren(node, options).trim() || joinBlocks(node.childNodes, listDepth + 1, options).trim();
-	const indent = '  '.repeat(listDepth);
-	return `${indent}${marker} ${content}`.trimEnd();
-}
+	service.addRule('strip-empty-links', {
+		filter(node) {
+			return node.nodeName === 'A';
+		},
+		replacement(content, node) {
+			const href = node.getAttribute('href') || '';
+			const text = String(content || '').replace(/\u200B/g, '').trim();
+			if (!href) return content;
+			if (!text) return '';
+			return `[${content}](${href})`;
+		},
+	});
 
-function renderInlineChildren(node, options) {
-	const parts = [];
-	for (const child of Array.from(node.childNodes)) {
-		if (child.nodeType === 3) {
-			parts.push(normalizeInlineText(child.textContent || ''));
-			continue;
-		}
-		if (child.nodeType !== 1) continue;
-		const tag = String(child.tagName || '').toLowerCase();
-		if (tag === 'a') {
-			const href = child.getAttribute('href') || '';
-			const text = renderInlineChildren(child, options) || normalizeInlineText(child.textContent || '');
-			parts.push(href ? `[${text}](${href})` : text);
-			continue;
-		}
-		if (tag === 'strong' || tag === 'b') {
-			parts.push(`**${renderInlineChildren(child, options)}**`);
-			continue;
-		}
-		if (tag === 'em' || tag === 'i') {
-			parts.push(`*${renderInlineChildren(child, options)}*`);
-			continue;
-		}
-		if (tag === 'code') {
-			parts.push(`\`${child.textContent || ''}\``);
-			continue;
-		}
-		if (tag === 'br') {
-			parts.push('\n');
-			continue;
-		}
-		if (tag === 'img') {
-			const src = resolveImageSource(child, options);
-			const alt = child.getAttribute('alt') || '';
-			if (shouldKeepImage(src, options)) {
-				parts.push(`![${alt}](${src})`);
-			}
-			continue;
-		}
-		const blockLike = ['p', 'div', 'section', 'article', 'ul', 'ol', 'pre', 'blockquote'].includes(tag);
-		parts.push(blockLike ? `\n${renderNode(child, 0, options)}\n` : renderInlineChildren(child, options));
-	}
-	return normalizeInlineText(parts.join('')).replace(/\n{3,}/g, '\n\n').trim();
-}
-
-function joinBlocks(childNodes, listDepth, options) {
-	return Array.from(childNodes)
-		.map((child) => renderNode(child, listDepth, options))
-		.filter((chunk) => chunk && chunk.trim())
-		.join('\n\n');
-}
-
-function normalizeInlineText(text) {
-	return String(text || '').replace(/\s+/g, ' ');
+	return service;
 }
 
 function isUploadableFile(value) {
