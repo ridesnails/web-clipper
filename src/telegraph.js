@@ -1,4 +1,4 @@
-// Telegraph API 封装与 HTML/Markdown → Telegraph Node 转换
+// Telegraph API 封装与 HTML 主链路 / Markdown fallback → Telegraph Node 转换
 import { marked } from 'marked';
 import { parseHTML } from 'linkedom';
 import { normalizeCodeBlocksHtml } from './code-blocks.js';
@@ -53,6 +53,35 @@ export function markdownToTelegraphNodes(markdown) {
 	const processed = preprocessTables(markdown);
 	const html = marked.parse(processed, { async: false });
 	return htmlToTelegraphNodes(html);
+}
+
+/**
+ * Telegraph 内容构建策略：
+ * 1. 优先直接使用 HTML 转 Node
+ * 2. 只有拿不到 HTML 时，才退回 Markdown fallback
+ */
+export function buildTelegraphNodes({ html = '', markdown = '', summary = '', tags = [] }) {
+	const bodyHtml = String(html || '').trim();
+	if (bodyHtml) {
+		return htmlToTelegraphNodes(buildTelegraphHtml({ body: bodyHtml, summary, tags }));
+	}
+
+	const blocks = [];
+	if (summary) {
+		blocks.push('#### 摘要', '', summary.trim(), '');
+	}
+
+	const tagLine = formatTagLine(tags);
+	if (tagLine) {
+		blocks.push(`标签：${tagLine}`, '');
+	}
+
+	const bodyMarkdown = String(markdown || '').trim();
+	if (bodyMarkdown) {
+		blocks.push(bodyMarkdown);
+	}
+
+	return markdownToTelegraphNodes(blocks.join('\n\n'));
 }
 
 /**
@@ -224,6 +253,19 @@ function escapeHtml(str) {
 	return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function buildTelegraphHtml({ body, summary, tags = [] }) {
+	const prefix = [];
+	if (summary) {
+		prefix.push(`<h4>摘要</h4>`, `<p>${escapeHtml(summary)}</p>`);
+	}
+	const tagLine = formatTagLine(tags);
+	if (tagLine) {
+		prefix.push(`<p>标签：${escapeHtml(tagLine)}</p>`);
+	}
+	if (!prefix.length) return body;
+	return `${prefix.join('\n')}\n${body || ''}`;
+}
+
 function escapeAttr(str) {
 	return escapeHtml(str).replace(/"/g, '&quot;');
 }
@@ -235,4 +277,20 @@ function decodeHtml(str) {
 		.replace(/&lt;/g, '<')
 		.replace(/&gt;/g, '>')
 		.replace(/&amp;/g, '&');
+}
+
+function formatTagLine(tags = []) {
+	return tags
+		.map((tag) => normalizeHashtag(tag))
+		.filter(Boolean)
+		.map((tag) => `#${tag}`)
+		.join(' ');
+}
+
+function normalizeHashtag(tag) {
+	return String(tag || '')
+		.trim()
+		.replace(/\s+/g, '_')
+		.replace(/-/g, '_')
+		.replace(/[^\w\u4e00-\u9fff]/g, '');
 }

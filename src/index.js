@@ -1,7 +1,6 @@
 import { sendPhoto, sendMessage, getFile } from './telegram.js';
 import { parseSingleFileUpload } from './singlefile.js';
-import { createPage, htmlToTelegraphNodes } from './telegraph.js';
-import { marked } from 'marked';
+import { buildTelegraphNodes, createPage } from './telegraph.js';
 
 // CORS 响应头
 function corsHeaders(env) {
@@ -445,12 +444,10 @@ function noteContainsUrl(content, url) {
 }
 
 async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, sourceHtml, summary, tags, env }) {
-	// Telegraph 内容优先使用 SingleFile 上传的 HTML；否则回退到原网页 HTML；再不行才回退到 Jina Markdown。
+	// Telegraph 走 HTML 主链路；只有拿不到 HTML 时，才退回 Markdown fallback。
 	const uploadedHtml = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, articleUrl) : '';
 	const fetchedHtml = uploadedHtml ? '' : await fetchSourceHtml(articleUrl);
-	const telegraphHtmlSource =
-		uploadedHtml ||
-		(fetchedHtml ? prepareSourceHtmlForTelegraph(fetchedHtml, articleUrl) : marked.parse(String(cleanBody || ''), { async: false }));
+	const telegraphHtmlSource = uploadedHtml || (fetchedHtml ? prepareSourceHtmlForTelegraph(fetchedHtml, articleUrl) : '');
 
 	// 从 HTML 中提取图片 URL；HTML 获取失败时降级提取 Markdown 图片。
 	const imageItems =
@@ -474,8 +471,8 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 		}
 	}
 
-	// 替换图片 URL 为 Worker 代理链接，并补充 AI 摘要/标签
-	let telegraphHtml = buildTelegraphHtml({ body: telegraphHtmlSource, summary, tags });
+	// 替换图片 URL 为 Worker 代理链接；HTML 是主链路，Markdown 只在无 HTML 时兜底。
+	let telegraphHtml = telegraphHtmlSource;
 	const publicBaseUrl = resolvePublicBaseUrl(requestUrl, env.PUBLIC_BASE_URL);
 	if (publicBaseUrl) {
 		for (const mapping of imageMappings) {
@@ -486,8 +483,12 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 		console.warn('Skip Telegraph image proxy replacement: no public base URL available');
 	}
 
-	// 转换 HTML 为 Telegraph Node 数组
-	const nodes = htmlToTelegraphNodes(telegraphHtml);
+	const nodes = buildTelegraphNodes({
+		html: telegraphHtml,
+		markdown: cleanBody,
+		summary,
+		tags,
+	});
 
 	// 创建 Telegraph 页面
 	const pageResult = await createPage(title, nodes, env);
@@ -815,19 +816,6 @@ function absolutizeHtmlUrls(html, baseUrl) {
 	);
 }
 
-function buildTelegraphHtml({ body, summary, tags = [] }) {
-	const prefix = [];
-	if (summary) {
-		prefix.push(`<h4>摘要</h4>`, `<p>${escapeHtml(summary)}</p>`);
-	}
-	const tagLine = formatTagLine(tags);
-	if (tagLine) {
-		prefix.push(`<p>标签：${escapeHtml(tagLine)}</p>`);
-	}
-	if (!prefix.length) return body;
-	return `${prefix.join('\n')}\n${body || ''}`;
-}
-
 function getHostname(url) {
 	try {
 		return new URL(url).hostname;
@@ -979,7 +967,6 @@ export {
 	extractImageUrls,
 	extractHtmlImageUrls,
 	escapeHtml,
-	buildTelegraphHtml,
 	prepareSourceHtmlForTelegraph,
 };
 
