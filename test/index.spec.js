@@ -936,21 +936,7 @@ describe('SingleFile upload entry', () => {
 					{ status: 200 },
 				),
 			)
-			.mockResolvedValueOnce(
-				new Response(JSON.stringify({ status: true }), { status: 200 }),
-			)
-			.mockResolvedValueOnce(
-				new Response(
-					JSON.stringify({
-						ok: true,
-						result: {
-							message_id: 88,
-							photo: [{ file_id: 'inline-photo-file', file_unique_id: 'uniq-inline', width: 800 }],
-						},
-					}),
-					{ status: 200 },
-				),
-			);
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
 
 		const request = createSingleFileRequest({ html });
 		const ctx = createExecutionContext();
@@ -961,6 +947,7 @@ describe('SingleFile upload entry', () => {
 		const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
 		expect(payload.content).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=inline-photo-file`);
 		expect(payload.content).not.toContain('data:image/png;base64,QUJDRA==');
+		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
 	it('POST /upload-html for nodeseek-like page - chooses the longest post-content block', async () => {
