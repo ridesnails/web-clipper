@@ -1,20 +1,21 @@
 {
-  "name": "web-clipper",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "test": "vitest"
-  },
-  "devDependencies": {
-    "vitest": "~3.2.0",
-    "wrangler": "^4.91.0"
-  },
-  "dependencies": {
-    "@mozilla/readability": "^0.6.0",
-    "linkedom": "^0.18.12",
-    "turndown": "^7.2.4"
-  }
+	"name": "web-clipper",
+	"version": "0.1.0",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"test": "vitest"
+	},
+	"devDependencies": {
+		"vitest": "~3.2.0",
+		"wrangler": "^4.91.0"
+	},
+	"dependencies": {
+		"@mozilla/readability": "^0.6.0",
+		"linkedom": "^0.18.12",
+		"marked": "^18.0.4",
+		"turndown": "^7.2.4"
+	}
 }

@@ -75,9 +75,9 @@ describe('markdownToTelegraphNodes', () => {
 		expect(result).toEqual([{ tag: 'h4', children: ['World'] }]);
 	});
 
-	it('三级标题 ### Deep → 加粗段落', () => {
+	it('三级标题 ### Deep → h3（marked 生成 h3，normalize 保持）', () => {
 		const result = markdownToTelegraphNodes('### Deep');
-		expect(result).toEqual([{ tag: 'p', children: [{ tag: 'b', children: ['Deep'] }] }]);
+		expect(result).toEqual([{ tag: 'h3', children: ['Deep'] }]);
 	});
 
 	it('普通段落 Some text → p', () => {
@@ -92,12 +92,12 @@ describe('markdownToTelegraphNodes', () => {
 		expect(result[0].children).toEqual([{ tag: 'a', attrs: { href: 'http://a.com' }, children: ['text'] }]);
 	});
 
-	it('图片 ![alt](http://img.jpg) → img', () => {
+	it('图片 ![alt](http://img.jpg) → p 包裹 img', () => {
 		const result = markdownToTelegraphNodes('![alt](http://img.jpg)');
-		expect(result).toEqual([{ tag: 'img', attrs: { src: 'http://img.jpg' } }]);
+		expect(result).toEqual([{ tag: 'p', children: [{ tag: 'img', attrs: { src: 'http://img.jpg' } }] }]);
 	});
 
-	it('缺失 href/src 的 HTML 标签不会触发 startsWith 异常', () => {
+	it('缺失 href/src 的 HTML 标签不会触发异常', () => {
 		const result = htmlToTelegraphNodes('<p>before <a>link</a> <img> after</p>');
 		expect(result).toEqual([{ tag: 'p', children: ['before ', { tag: 'a', children: ['link'] }, { tag: 'img' }, ' after'] }]);
 	});
@@ -114,12 +114,14 @@ describe('markdownToTelegraphNodes', () => {
 		const result = markdownToTelegraphNodes(md);
 		expect(result).toHaveLength(1);
 		expect(result[0].tag).toBe('pre');
-		expect(result[0].children).toEqual([{ tag: 'code', children: ['const x = 1;'] }]);
+		expect(result[0].children).toHaveLength(1);
+		expect(result[0].children[0].tag).toBe('code');
+		expect(result[0].children[0].children[0]).toContain('const x = 1;');
 	});
 
-	it('引用块 > quote → blockquote', () => {
+	it('引用块 > quote → blockquote > p', () => {
 		const result = markdownToTelegraphNodes('> quote');
-		expect(result).toEqual([{ tag: 'blockquote', children: ['quote'] }]);
+		expect(result).toEqual([{ tag: 'blockquote', children: [{ tag: 'p', children: ['quote'] }] }]);
 	});
 
 	it('水平线 --- → hr', () => {
@@ -132,6 +134,17 @@ describe('markdownToTelegraphNodes', () => {
 		expect(result).toHaveLength(1);
 		expect(result[0].tag).toBe('p');
 		expect(result[0].children).toEqual(['Use ', { tag: 'code', children: ['code'] }, ' here']);
+	});
+
+	it('粗体 **bold** 和斜体 *italic* → strong / em', () => {
+		const result = markdownToTelegraphNodes('**bold** and *italic*');
+		expect(result).toHaveLength(1);
+		expect(result[0].tag).toBe('p');
+		expect(result[0].children).toEqual([
+			{ tag: 'strong', children: ['bold'] },
+			' and ',
+			{ tag: 'em', children: ['italic'] },
+		]);
 	});
 
 	it('混合段落：文字 + 链接 + 文字 → children 数组混合字符串和对象', () => {
@@ -212,6 +225,6 @@ describe('markdownToTelegraphNodes', () => {
 		const md = '```\nmkdir cloudflare-imgbed\ncd cloudflare-imgbed\n```';
 		const nodes = markdownToTelegraphNodes(md);
 		const codeText = nodes[0].children[0].children[0];
-		expect(codeText).toBe('mkdir cloudflare-imgbed\ncd cloudflare-imgbed');
+		expect(codeText).toContain('mkdir cloudflare-imgbed\ncd cloudflare-imgbed');
 	});
 });

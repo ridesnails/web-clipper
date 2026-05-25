@@ -1,4 +1,6 @@
 // Telegraph API 封装与 HTML/Markdown → Telegraph Node 转换
+import { marked } from 'marked';
+import { parseHTML } from 'linkedom';
 
 const SUPPORTED_TAGS = new Set(['a', 'aside', 'b', 'blockquote', 'br', 'code', 'em', 'figcaption', 'figure', 'h3', 'h4', 'hr', 'i', 'iframe', 'img', 'li', 'ol', 'p', 'pre', 's', 'strong', 'u', 'ul', 'video']);
 const VOID_TAGS = new Set(['br', 'hr', 'img', 'iframe', 'video']);
@@ -47,7 +49,9 @@ export async function createPage(title, contentNodes, env) {
  */
 export function markdownToTelegraphNodes(markdown) {
 	if (!markdown || !markdown.trim()) return [];
-	return htmlToTelegraphNodes(markdownToHtml(markdown));
+	const processed = preprocessTables(markdown);
+	const html = marked.parse(processed, { async: false });
+	return htmlToTelegraphNodes(html);
 }
 
 /**
@@ -58,104 +62,31 @@ export function markdownToTelegraphNodes(markdown) {
  */
 export function htmlToTelegraphNodes(html) {
 	if (!html || !html.trim()) return [];
-	const root = { tag: 'root', children: [] };
-	const stack = [root];
-	const tokenRe = /<!--[\s\S]*?-->|<!DOCTYPE[\s\S]*?>|<[^>]+>|[^<]+/gi;
-	let match;
-
-	while ((match = tokenRe.exec(html)) !== null) {
-		const token = match[0];
-		if (!token || token.startsWith('<!--') || /^<!DOCTYPE/i.test(token)) continue;
-
-		if (token.startsWith('</')) {
-			const closing = normalizeTag(token.slice(2, -1).trim().split(/\s+/)[0]);
-			for (let i = stack.length - 1; i > 0; i--) {
-				if (stack[i].tag === closing) {
-					stack.length = i;
-					break;
-				}
-			}
-			continue;
+	const { document } = parseHTML('<html><body><div id="root">' + html + '</div></body></html>');
+	const root = document.getElementById('root');
+	const nodes = [];
+	for (const child of root.childNodes) {
+		const node = domToNode(child);
+		if (node) {
+			if (Array.isArray(node)) nodes.push(...node);
+			else nodes.push(node);
 		}
-
-		if (token.startsWith('<')) {
-			const parsed = parseStartTag(token);
-			if (!parsed) continue;
-			const { tag, attrs, selfClosing } = parsed;
-			if (!SUPPORTED_TAGS.has(tag)) continue;
-
-			const node = { tag };
-			const safeAttrs = sanitizeAttrs(tag, attrs);
-			if (Object.keys(safeAttrs).length > 0) node.attrs = safeAttrs;
-
-			appendChild(stack[stack.length - 1], node);
-			if (!selfClosing && !VOID_TAGS.has(tag)) stack.push(node);
-			continue;
-		}
-
-		const parentTag = stack[stack.length - 1].tag;
-		const text = parentTag === 'pre' || parentTag === 'code' ? decodeHtml(token) : decodeHtml(token.replace(/\s+/g, ' '));
-		if (text) appendChild(stack[stack.length - 1], text);
 	}
-
-	return compactNodes(root.children);
+	return compactNodes(nodes);
 }
 
-function markdownToHtml(markdown) {
+/* ─── 内部实现 ─── */
+
+/**
+ * 将 Markdown 中的 GFM 表格语法临时转换为围栏代码块，
+ * 因为 Telegraph 不支持 table 标签，保留原始文本更友好。
+ */
+function preprocessTables(markdown) {
 	const lines = markdown.replace(/\r\n/g, '\n').split('\n');
-	const html = [];
-	let paragraph = [];
-	let listType = null;
-	let inCodeBlock = false;
-	let codeLines = [];
-
-	function flushParagraph() {
-		if (paragraph.length > 0) {
-			html.push(`<p>${parseInline(paragraph.join(' '))}</p>`);
-			paragraph = [];
-		}
-	}
-
-	function flushList() {
-		if (listType) {
-			html.push(`</${listType}>`);
-			listType = null;
-		}
-	}
-
-	function flushCode() {
-		html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
-		codeLines = [];
-	}
-
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i];
-		const trimmed = line.trim();
-
-		if (trimmed.startsWith('```')) {
-			if (inCodeBlock) {
-				flushCode();
-				inCodeBlock = false;
-			} else {
-				flushParagraph();
-				flushList();
-				inCodeBlock = true;
-			}
-			continue;
-		}
-
-		if (inCodeBlock) {
-			codeLines.push(line);
-			continue;
-		}
-
-		if (!trimmed) {
-			flushParagraph();
-			flushList();
-			continue;
-		}
-
-		if (trimmed.includes('|')) {
+	const result = [];
+	let i = 0;
+	while (i < lines.length) {
+		if (lines[i].includes('|')) {
 			const tableLines = [];
 			let j = i;
 			while (j < lines.length && lines[j].includes('|')) {
@@ -165,99 +96,85 @@ function markdownToHtml(markdown) {
 			const isSeparator = (s) => /^\s*\|?[\s\-:|]+\|?[\s\-:|]*$/.test(s);
 			const isTable = tableLines.length >= 2 && (isSeparator(tableLines[1]) || tableLines.every((l) => l.includes('|')));
 			if (isTable) {
-				flushParagraph();
-				flushList();
-				html.push(`<pre><code>${escapeHtml(tableLines.join('\n'))}</code></pre>`);
-				i = j - 1;
+				result.push('```');
+				result.push(...tableLines);
+				result.push('```');
+				i = j;
 				continue;
 			}
 		}
+		result.push(lines[i]);
+		i++;
+	}
+	return result.join('\n');
+}
 
-		const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
-		if (heading) {
-			flushParagraph();
-			flushList();
-			const level = heading[1].length;
-			if (level === 1 || level === 2) {
-				const tag = level === 1 ? 'h3' : 'h4';
-				html.push(`<${tag}>${parseInline(heading[2])}</${tag}>`);
-			} else {
-				html.push(`<p><b>${parseInline(heading[2])}</b></p>`);
+function domToNode(element) {
+	if (element.nodeType === 3) {
+		if (!element.nodeValue) return null;
+		const parentTag = element.parentElement?.tagName?.toLowerCase();
+		if (parentTag !== 'pre' && parentTag !== 'code') {
+			if (/^\s*$/.test(element.nodeValue) && element.nodeValue.includes('\n')) {
+				return null;
 			}
-			continue;
 		}
-
-		if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
-			flushParagraph();
-			flushList();
-			html.push('<hr>');
-			continue;
+		if (parentTag === 'p' && element.nodeValue) {
+			return element.nodeValue.replace(/\n/g, ' ');
 		}
-
-		const quote = trimmed.match(/^>\s*(.*)$/);
-		if (quote) {
-			flushParagraph();
-			flushList();
-			html.push(`<blockquote>${parseInline(quote[1])}</blockquote>`);
-			continue;
-		}
-
-		const img = trimmed.match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
-		if (img) {
-			flushParagraph();
-			flushList();
-			html.push(`<img src="${escapeAttr(img[2])}">`);
-			continue;
-		}
-
-		const list = trimmed.match(/^(-|\*|\d+\.)\s+(.+)$/);
-		if (list) {
-			flushParagraph();
-			const nextType = /\d+\./.test(list[1]) ? 'ol' : 'ul';
-			if (listType && listType !== nextType) flushList();
-			if (!listType) {
-				listType = nextType;
-				html.push(`<${listType}>`);
-			}
-			html.push(`<li>${parseInline(list[2])}</li>`);
-			continue;
-		}
-
-		paragraph.push(trimmed);
+		return element.nodeValue;
 	}
 
-	flushParagraph();
-	flushList();
-	if (inCodeBlock && codeLines.length > 0) flushCode();
-	return html.join('\n');
-}
-
-function parseInline(text) {
-	let s = escapeHtml(text);
-	s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, '<img src="$2">');
-	s = s.replace(/\[([^\]]*)\]\((https?:\/\/[^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, label, href) => {
-		const visibleLabel = label.replace(/\u200B/g, '').trim();
-		if (!visibleLabel) return '';
-		return `<a href="${href}">${label}</a>`;
-	});
-	s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-	s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-	s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-	s = s.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
-	s = s.replace(/(?<!_)_([^_]+)_(?!_)/g, '<em>$1</em>');
-	s = s.replace(/~~([^~]+)~~/g, '<s>$1</s>');
-	return s;
-}
-
-function parseStartTag(token) {
-	const selfClosing = /\/\s*>$/.test(token);
-	const inner = token.slice(1, token.length - (selfClosing ? 2 : 1)).trim();
-	if (!inner) return null;
-	const space = inner.search(/\s/);
-	const rawTag = space === -1 ? inner : inner.slice(0, space);
+	const rawTag = element.tagName.toLowerCase();
 	const tag = normalizeTag(rawTag);
-	const attrText = space === -1 ? '' : inner.slice(space + 1);
-	return { tag, attrs: parseAttrs(attrText), selfClosing };
+
+	if (!SUPPORTED_TAGS.has(tag)) {
+		const children = [];
+		for (const child of element.childNodes) {
+			const childNode = domToNode(child);
+			if (childNode) {
+				if (Array.isArray(childNode)) children.push(...childNode);
+				else children.push(childNode);
+			}
+		}
+		return children.length ? children : null;
+	}
+
+	const node = { tag };
+
+	if (tag === 'a') {
+		const href = element.getAttribute('href');
+		if (href && isSafeUrl(href)) {
+			node.attrs = { href };
+		}
+	}
+	if (tag === 'img' || tag === 'video' || tag === 'iframe') {
+		const src = element.getAttribute('src');
+		if (src && isSafeUrl(src)) {
+			node.attrs = { src: tag === 'iframe' ? transformToIframeUrl(src) : src };
+		}
+	}
+
+	if (!VOID_TAGS.has(tag) && element.childNodes.length) {
+		node.children = [];
+		for (const child of element.childNodes) {
+			const childNode = domToNode(child);
+			if (childNode) {
+				if (Array.isArray(childNode)) node.children.push(...childNode);
+				else node.children.push(childNode);
+			}
+		}
+	}
+
+	// 过滤没有有意义内容的 <a> 标签（空链接、零宽空格链接）
+	if (tag === 'a') {
+		const hasContent = node.children?.some((child) => {
+			if (typeof child === 'string') return child.replace(/\u200B/g, '').trim().length > 0;
+			return true;
+		});
+		if (!hasContent) return null;
+	}
+
+	return node;
 }
 
 function normalizeTag(tag) {
@@ -266,25 +183,6 @@ function normalizeTag(tag) {
 	if (t === 'h2' || t === 'h6') return 'h4';
 	if (t === 'del') return 's';
 	return t;
-}
-
-function parseAttrs(attrText) {
-	const attrs = {};
-	const attrRe = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
-	let match;
-	while ((match = attrRe.exec(attrText)) !== null) {
-		attrs[match[1].toLowerCase()] = decodeHtml(match[3] ?? match[4] ?? match[5] ?? '');
-	}
-	return attrs;
-}
-
-function sanitizeAttrs(tag, attrs) {
-	const safe = {};
-	if (tag === 'a' && isSafeUrl(attrs.href)) safe.href = attrs.href;
-	if ((tag === 'img' || tag === 'video' || tag === 'iframe') && isSafeUrl(attrs.src)) {
-		safe.src = tag === 'iframe' ? transformToIframeUrl(attrs.src) : attrs.src;
-	}
-	return safe;
 }
 
 function transformToIframeUrl(url) {
@@ -302,11 +200,6 @@ function transformToIframeUrl(url) {
 
 function isSafeUrl(url) {
 	return typeof url === 'string' && (/^https?:\/\//i.test(url) || url.startsWith('/embed/'));
-}
-
-function appendChild(parent, child) {
-	parent.children ??= [];
-	parent.children.push(child);
 }
 
 function compactNodes(nodes) {
