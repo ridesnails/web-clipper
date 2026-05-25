@@ -903,4 +903,37 @@ describe('SingleFile upload entry', () => {
 		expect(fnsPayload.content).toContain('![real-image](data:image/webp;base64,AAAA)');
 		expect(fnsPayload.content).not.toContain('data:image/svg+xml');
 	});
+
+	it('POST /upload-html for nodeseek-like page - chooses the longest post-content block', async () => {
+		const html = `
+			<html>
+				<head>
+					<title>Nodeseek Multi Post</title>
+					<meta property="og:url" content="https://www.nodeseek.com/post-735659-1" />
+				</head>
+				<body>
+					<article class="post-content"><p>Short reply</p></article>
+					<article class="post-content">
+						<p>Main article first paragraph.</p>
+						<p>Main article second paragraph with more content.</p>
+						<img alt="real-image" src="data:image/webp;base64,BBBB" />
+					</article>
+				</body>
+			</html>
+		`;
+
+		fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: true }), { status: 200 }));
+
+		const request = createSingleFileRequest({ html, url: 'https://www.nodeseek.com/post-735659-1' });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const fnsPayload = JSON.parse(fetchMock.mock.calls[0][1].body);
+		expect(fnsPayload.content).toContain('Main article first paragraph.');
+		expect(fnsPayload.content).toContain('Main article second paragraph with more content.');
+		expect(fnsPayload.content).toContain('![real-image](data:image/webp;base64,BBBB)');
+		expect(fnsPayload.content).not.toContain('Short reply');
+	});
 });

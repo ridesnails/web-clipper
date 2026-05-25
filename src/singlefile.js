@@ -49,7 +49,7 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 	}
 
 	const title = normalizeTitle(article?.title || document.title || stripHtmlExtension(filename) || 'untitled');
-	const articleHtml = preserveRichImages ? extractPreservedArticleHtml(document) || article?.content || extractBodyInnerHtml(document) : article?.content || extractReadableFallbackHtml(document) || extractBodyInnerHtml(document);
+	const articleHtml = preserveRichImages ? extractPreservedArticleHtml(document, docUrl) || article?.content || extractBodyInnerHtml(document) : article?.content || extractReadableFallbackHtml(document) || extractBodyInnerHtml(document);
 	const markdownBody = htmlFragmentToMarkdown(articleHtml, { preserveRichImages });
 
 	if (!markdownBody.trim()) {
@@ -269,7 +269,13 @@ function shouldPreserveRichImages(url) {
 	}
 }
 
-function extractPreservedArticleHtml(document) {
+function extractPreservedArticleHtml(document, url) {
+	try {
+		const hostname = new URL(url).hostname;
+		if (hostname === 'www.nodeseek.com' || hostname === 'nodeseek.com') {
+			return selectBestHtmlBlock(document.querySelectorAll('article.post-content, .post-content'));
+		}
+	} catch {}
 	return document.querySelector('article, [class*="post-content"], [class*="content-item"]')?.innerHTML || '';
 }
 
@@ -277,4 +283,19 @@ function shouldKeepImage(src, options) {
 	if (!src) return false;
 	if (src.startsWith('data:image/svg+xml')) return false;
 	return true;
+}
+
+function selectBestHtmlBlock(nodeList) {
+	let bestHtml = '';
+	let bestScore = -1;
+	for (const node of Array.from(nodeList || [])) {
+		const textLength = normalizeInlineText(node.textContent || '').length;
+		const imageCount = node.querySelectorAll?.('img').length || 0;
+		const score = textLength + imageCount * 40;
+		if (score > bestScore) {
+			bestScore = score;
+			bestHtml = node.innerHTML || '';
+		}
+	}
+	return bestHtml;
 }
