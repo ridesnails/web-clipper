@@ -147,7 +147,7 @@ async function fetchArticleFromUrl(url, env) {
 }
 
 async function clipArticle({ requestUrl, article, env }) {
-	const { title, url, markdownBody, sourceHtml } = article;
+	let { title, url, markdownBody, sourceHtml } = article;
 	const slug = makeSlug(title);
 	const now = new Date();
 	const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -156,6 +156,20 @@ async function clipArticle({ requestUrl, article, env }) {
 		.replace(/[-:]/g, '')
 		.replace(/\.\d{3}Z$/, 'Z');
 	const path = `${env.CLIP_FOLDER}/${yyyymm}/${timestamp}-${slug}.md`;
+
+	if (sourceHtml) {
+		const inlineImageMappings = await externalizeInlineImages({
+			requestUrl,
+			sourceHtml,
+			env,
+		});
+		if (inlineImageMappings.length > 0) {
+			for (const mapping of inlineImageMappings) {
+				markdownBody = markdownBody.replaceAll(mapping.original, mapping.replacement);
+				sourceHtml = sourceHtml.replaceAll(mapping.original, mapping.replacement);
+			}
+		}
+	}
 
 	let aiMetadata = null;
 	if (env.AI_API_KEY) {
@@ -303,6 +317,38 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 
 	console.log('Telegraph/Telegram pushed:', telegraphUrl, telegramMessageId);
 	return { telegraphUrl, telegramMessageId };
+}
+
+async function externalizeInlineImages({ requestUrl, sourceHtml, env }) {
+	const publicBaseUrl = resolvePublicBaseUrl(requestUrl, env.PUBLIC_BASE_URL);
+	if (!publicBaseUrl) return [];
+
+	const mappings = [];
+	const seen = new Set();
+	const regex = /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g;
+	let match;
+
+	while ((match = regex.exec(sourceHtml)) !== null) {
+		const dataUrl = match[0];
+		if (seen.has(dataUrl)) continue;
+		seen.add(dataUrl);
+
+		try {
+			const uploadResult = await sendPhoto(dataUrlToBytes(dataUrl), 'singlefile-image', env);
+			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(uploadResult.file_id)}`;
+			mappings.push({ original: dataUrl, replacement: proxyUrl });
+		} catch (e) {
+			console.error('Inline image upload failed:', e.message);
+		}
+	}
+
+	return mappings;
+}
+
+function dataUrlToBytes(dataUrl) {
+	const commaIndex = dataUrl.indexOf(',');
+	const base64 = commaIndex === -1 ? '' : dataUrl.slice(commaIndex + 1);
+	return Uint8Array.from(Buffer.from(base64, 'base64'));
 }
 
 async function handleTelegramWebhook(request, env) {

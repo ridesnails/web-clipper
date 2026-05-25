@@ -780,7 +780,7 @@ describe('SingleFile upload entry', () => {
 		form.append('singlehtmlfile', new File([html], 'article.html', { type: 'text/html' }));
 		form.append('url', url);
 		const headers = auth ? { Authorization: auth } : undefined;
-		return new Request('http://example.com/upload-html', {
+		return new Request('http://127.0.0.1:8787/upload-html', {
 			method: 'POST',
 			headers,
 			body: form,
@@ -902,6 +902,65 @@ describe('SingleFile upload entry', () => {
 		const fnsPayload = JSON.parse(fetchMock.mock.calls[0][1].body);
 		expect(fnsPayload.content).toContain('![real-image](data:image/webp;base64,AAAA)');
 		expect(fnsPayload.content).not.toContain('data:image/svg+xml');
+	});
+
+	it('POST /upload-html - rewrites inline base64 images to worker proxy URLs when PUBLIC_BASE_URL is configured', async () => {
+		const html = `
+			<html>
+				<head><title>Inline Image Post</title></head>
+				<body>
+					<article>
+						<p>Inline image below.</p>
+						<img alt="inline" src="data:image/png;base64,QUJDRA==" />
+					</article>
+				</body>
+			</html>
+		`;
+		const env = {
+			...mockEnv,
+			IMG_BOT: '111111:IMGbotToken',
+			TELEGRAM_CHAT_ID: '-1001234567890',
+			PUBLIC_BASE_URL: telegraphPublicBaseUrl,
+		};
+
+		fetchMock
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: {
+							message_id: 77,
+							photo: [{ file_id: 'inline-photo-file', file_unique_id: 'uniq-inline', width: 800 }],
+						},
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ status: true }), { status: 200 }),
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: {
+							message_id: 88,
+							photo: [{ file_id: 'inline-photo-file', file_unique_id: 'uniq-inline', width: 800 }],
+						},
+					}),
+					{ status: 200 },
+				),
+			);
+
+		const request = createSingleFileRequest({ html });
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, env, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const payload = JSON.parse(fetchMock.mock.calls[1][1].body);
+		expect(payload.content).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=inline-photo-file`);
+		expect(payload.content).not.toContain('data:image/png;base64,QUJDRA==');
 	});
 
 	it('POST /upload-html for nodeseek-like page - chooses the longest post-content block', async () => {

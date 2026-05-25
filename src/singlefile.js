@@ -37,6 +37,7 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 	const docUrl = resolveDocumentUrl(document, url, filename);
 	const preserveRichImages = shouldPreserveRichImages(docUrl);
 	const imageVariableMap = extractSingleFileImageVariableMap(document);
+	hydrateSingleFileImageSources(document, imageVariableMap);
 
 	let article = null;
 	try {
@@ -297,6 +298,20 @@ function extractSingleFileImageVariableMap(document) {
 		}
 	}
 	return map;
+}
+
+function hydrateSingleFileImageSources(document, imageVariableMap) {
+	for (const img of Array.from(document.querySelectorAll('img'))) {
+		const src = img.getAttribute('src') || '';
+		if (!src.startsWith('data:image/svg+xml')) continue;
+		const style = img.getAttribute('style') || '';
+		const varMatch = style.match(/background-image:\s*var\((--sf-img-\d+)\)/);
+		if (!varMatch) continue;
+		const realSrc = imageVariableMap.get(varMatch[1]);
+		if (realSrc) {
+			img.setAttribute('src', realSrc);
+		}
+	}
 }
 
 function resolveImageSource(node, options) {
