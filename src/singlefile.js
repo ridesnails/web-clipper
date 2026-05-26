@@ -1,6 +1,6 @@
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
-import TurndownService from 'turndown';
+import TurndownService from './vendor/turndown.cjs.js';
 import { fenceCodeBlock, extractCodeLanguage, normalizeCodeBlocksHtml } from './code-blocks.js';
 
 const MAX_HTML_SIZE = 10 * 1024 * 1024;
