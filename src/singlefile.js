@@ -54,7 +54,15 @@ export function normalizeSingleFileHtml({ html, url, filename = 'singlefile.html
 	}
 
 	const title = normalizeTitle(article?.title || document.title || stripHtmlExtension(filename) || 'untitled');
-	const articleHtml = preserveRichImages ? extractPreservedArticleHtml(document, docUrl) || article?.content || extractBodyInnerHtml(document) : article?.content || extractReadableFallbackHtml(document) || extractBodyInnerHtml(document);
+	const preferredHtml = preserveRichImages ? extractPreservedArticleHtml(document, docUrl) : '';
+	const fallbackHtml = selectFallbackArticleHtml(document);
+	const readabilityHtml = article?.content || '';
+	const articleHtml = resolveBestArticleHtml({
+		preferredHtml,
+		readabilityHtml,
+		fallbackHtml,
+		bodyHtml: extractBodyInnerHtml(document),
+	});
 	const markdownBody = htmlFragmentToMarkdown(articleHtml, { preserveRichImages, imageVariableMap });
 
 	if (!markdownBody.trim()) {
@@ -88,6 +96,45 @@ function extractBodyInnerHtml(document) {
 
 function extractReadableFallbackHtml(document) {
 	return document.querySelector('article, main, [role="main"]')?.innerHTML || '';
+}
+
+function selectFallbackArticleHtml(document) {
+	const preferred = [
+		'#VPContent .vp-doc',
+		'main .vp-doc',
+		'article .vp-doc',
+		'.theme-default-content',
+		'main article',
+		'main [role="main"]',
+		'main',
+		'article',
+		'[role="main"]',
+	];
+
+	for (const selector of preferred) {
+		const node = document.querySelector(selector);
+		if (node?.innerHTML?.trim()) return node.innerHTML;
+	}
+
+	return extractReadableFallbackHtml(document);
+}
+
+function resolveBestArticleHtml({ preferredHtml = '', readabilityHtml = '', fallbackHtml = '', bodyHtml = '' }) {
+	if (preferredHtml.trim()) return preferredHtml;
+
+	if (looksLikeWeakArticleHtml(readabilityHtml) && fallbackHtml.trim()) {
+		return fallbackHtml;
+	}
+
+	return readabilityHtml || fallbackHtml || bodyHtml;
+}
+
+function looksLikeWeakArticleHtml(html) {
+	const normalized = normalizeInlineText(stripHtmlTags(html || ''));
+	if (!normalized) return true;
+	if (normalized.length < 200) return true;
+	if (normalized.includes('Skip to content')) return true;
+	return false;
 }
 
 function stripHtmlExtension(filename) {
@@ -137,6 +184,10 @@ function withDomGlobals(window, fn) {
 
 function normalizeInlineText(text) {
 	return String(text || '').replace(/\s+/g, ' ');
+}
+
+function stripHtmlTags(html) {
+	return String(html || '').replace(/<[^>]+>/g, ' ');
 }
 
 function createTurndownService(options) {
