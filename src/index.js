@@ -2,6 +2,11 @@ import { sendPhoto, sendMessage, getFile } from './telegram.js';
 import { parseSingleFileUpload } from './singlefile.js';
 import { buildTelegraphNodes, createPage } from './telegraph.js';
 
+const MAX_SINGLEFILE_INLINE_IMAGES = 6;
+const INLINE_IMAGE_UPLOAD_CONCURRENCY = 3;
+const FNS_REQUEST_TIMEOUT_MS = 15000;
+const AI_REQUEST_TIMEOUT_MS = 20000;
+
 // CORS 响应头
 function corsHeaders(env) {
 	return {
@@ -292,6 +297,7 @@ async function createFnsNote({ path, content, env }) {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
+		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({
 			vault: env.FNS_VAULT,
 			path,
@@ -321,6 +327,7 @@ async function findExistingNoteByUrl({ url, env }) {
 		headers: {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 		},
+		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 	});
 	const data = await safeJson(res);
 	if (!res.ok || !data?.status) {
@@ -350,6 +357,7 @@ async function getFnsNote({ path, env }) {
 		headers: {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 		},
+		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 	});
 	const data = await safeJson(res);
 	if (!res.ok || !data?.status || !data?.data?.content) {
@@ -365,6 +373,7 @@ async function patchFnsFrontmatter({ path, updates, env }) {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
+		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({
 			vault: env.FNS_VAULT,
 			path,
@@ -384,6 +393,7 @@ async function appendFnsNote({ path, content, env }) {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
+		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({
 			vault: env.FNS_VAULT,
 			path,
@@ -514,7 +524,7 @@ async function externalizeInlineImages({ requestUrl, sourceHtml, env }) {
 	const publicBaseUrl = resolvePublicBaseUrl(requestUrl, env.PUBLIC_BASE_URL);
 	if (!publicBaseUrl) return [];
 
-	const mappings = [];
+	const candidates = [];
 	const seen = new Set();
 	const regex = /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g;
 	let match;
@@ -523,23 +533,48 @@ async function externalizeInlineImages({ requestUrl, sourceHtml, env }) {
 		const dataUrl = match[0];
 		if (seen.has(dataUrl)) continue;
 		seen.add(dataUrl);
+		if (dataUrl.startsWith('data:image/svg+xml')) continue;
+		candidates.push(dataUrl);
+		if (candidates.length >= MAX_SINGLEFILE_INLINE_IMAGES) break;
+	}
 
+	if (!candidates.length) return [];
+
+	const tasks = candidates.map((dataUrl) => async () => {
 		try {
 			const uploadResult = await sendPhoto(dataUrlToBytes(dataUrl), 'singlefile-image', env);
 			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(uploadResult.file_id)}`;
-			mappings.push({ original: dataUrl, replacement: proxyUrl });
+			return { original: dataUrl, replacement: proxyUrl };
 		} catch (e) {
 			console.error('Inline image upload failed:', e.message);
+			return null;
 		}
-	}
+	});
 
-	return mappings;
+	const mappings = await runWithConcurrency(tasks, INLINE_IMAGE_UPLOAD_CONCURRENCY);
+	return mappings.filter(Boolean);
 }
 
 function dataUrlToBytes(dataUrl) {
 	const commaIndex = dataUrl.indexOf(',');
 	const base64 = commaIndex === -1 ? '' : dataUrl.slice(commaIndex + 1);
 	return Uint8Array.from(Buffer.from(base64, 'base64'));
+}
+
+async function runWithConcurrency(tasks, concurrency) {
+	const results = new Array(tasks.length);
+	let nextIndex = 0;
+
+	const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {
+		while (nextIndex < tasks.length) {
+			const currentIndex = nextIndex;
+			nextIndex += 1;
+			results[currentIndex] = await tasks[currentIndex]();
+		}
+	});
+
+	await Promise.all(workers);
+	return results;
 }
 
 async function handleTelegramWebhook(request, env) {
@@ -935,6 +970,7 @@ async function generateAiMetadata({ title, url, body, env }) {
 			Authorization: `Bearer ${env.AI_API_KEY}`,
 			'Content-Type': 'application/json',
 		},
+		signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({
 			model,
 			temperature: 0.2,

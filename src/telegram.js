@@ -33,6 +33,7 @@ export async function sendPhoto(fileBuffer, fileName, env) {
 	const res = await fetch(`https://api.telegram.org/bot${resolveImageBotToken(env)}/sendPhoto`, {
 		method: 'POST',
 		body: formData,
+		signal: AbortSignal.timeout(15000),
 	});
 
 	if (!res.ok) {
@@ -80,6 +81,7 @@ export async function sendMessage(text, chatId, env, options = {}) {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify(payload),
+		signal: AbortSignal.timeout(15000),
 	});
 
 	if (!res.ok) {
@@ -102,7 +104,9 @@ export async function sendMessage(text, chatId, env, options = {}) {
  * @returns {Promise<{file_path: string, file_url: string}>}
  */
 export async function getFile(fileId, env) {
-	const res = await fetch(`https://api.telegram.org/bot${resolveImageBotToken(env)}/getFile?file_id=${encodeURIComponent(fileId)}`);
+	const res = await fetch(`https://api.telegram.org/bot${resolveImageBotToken(env)}/getFile?file_id=${encodeURIComponent(fileId)}`, {
+		signal: AbortSignal.timeout(15000),
+	});
 
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({}));

@@ -176,7 +176,10 @@ describe('getFile', () => {
 
 		const result = await getFile('abc456', splitBotEnv);
 
-		expect(globalThis.fetch).toHaveBeenCalledWith(`https://api.telegram.org/bot${splitBotEnv.IMG_BOT}/getFile?file_id=abc456`);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			`https://api.telegram.org/bot${splitBotEnv.IMG_BOT}/getFile?file_id=abc456`,
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
+		);
 		expect(result.file_url).toBe(`https://api.telegram.org/file/bot${splitBotEnv.IMG_BOT}/photos/file_2.jpg`);
 	});
 
