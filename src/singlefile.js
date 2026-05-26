@@ -108,7 +108,7 @@ function htmlFragmentToMarkdown(articleHtml, options = {}) {
 	if (!root) return '';
 
 	const turndown = createTurndownService(options);
-	return turndown.turndown(root.innerHTML || normalizedHtml).trim();
+	return turndown.turndown(root).trim();
 }
 
 function withDomGlobals(window, fn) {
