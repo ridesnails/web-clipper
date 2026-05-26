@@ -103,16 +103,16 @@ function normalizeTitle(value) {
 function htmlFragmentToMarkdown(articleHtml, options = {}) {
 	if (!articleHtml || !articleHtml.trim()) return '';
 	const normalizedHtml = normalizeCodeBlocksHtml(articleHtml);
-	const { document } = parseHTML(`<!doctype html><html><body>${normalizedHtml}</body></html>`);
+	const { document, window } = parseHTML(`<!doctype html><html><body>${normalizedHtml}</body></html>`);
 	const root = document.body || document.firstElementChild || document.documentElement;
 	if (!root) return '';
 
 	const turndown = createTurndownService(options);
-	return turndown.turndown(root).trim();
+	return withDomGlobals(window, () => turndown.turndown(root.innerHTML || normalizedHtml).trim());
 }
 
 function withDomGlobals(window, fn) {
-	const keys = ['document', 'Node', 'NodeFilter', 'HTMLElement', 'HTMLImageElement', 'HTMLAnchorElement', 'Text'];
+	const keys = ['window', 'document', 'Node', 'NodeFilter', 'HTMLElement', 'HTMLImageElement', 'HTMLAnchorElement', 'Text', 'DOMParser'];
 	const previous = new Map();
 
 	for (const key of keys) {
