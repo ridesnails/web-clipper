@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createPage, htmlToTelegraphNodes, markdownToTelegraphNodes } from '../src/telegraph.js';
+import { createPage, extractTelegraphContentHtml, htmlToTelegraphNodes, markdownToTelegraphNodes } from '../src/telegraph.js';
 
 const mockEnv = {
 	TELEGRAPH_ACCESS_TOKEN: 'test-access-token-12345',
@@ -248,5 +248,49 @@ console.log(a);</code></pre></td>
 		expect(nodes[0].children[0].tag).toBe('code');
 		expect(nodes[0].children[0].children[0]).toContain('const a = 1;\nconsole.log(a);');
 		expect(nodes[0].children[0].children[0]).not.toContain('1\n2');
+	});
+
+	it('文档站 HTML 优先抽取 vp-doc 正文区域', () => {
+		const html = `
+			<body>
+				<a href="#VPContent">Skip to content</a>
+				<div id="VPContent">
+					<main>
+						<div class="vp-doc">
+							<h1>第 6 章 进阶功能</h1>
+							<p>正文段落</p>
+							<pre><code class="language-bash">echo hello</code></pre>
+						</div>
+					</main>
+				</div>
+			</body>
+		`;
+
+		const extracted = extractTelegraphContentHtml(html);
+		expect(extracted).toContain('第 6 章 进阶功能');
+		expect(extracted).toContain('正文段落');
+		expect(extracted).toContain('echo hello');
+		expect(extracted).not.toContain('Skip to content');
+	});
+
+	it('带注释和脚本壳的文档站 HTML 不应在转换时崩溃', () => {
+		const html = `
+			<!--before-->
+			<div id="VPContent">
+				<div class="vp-doc">
+					<h1>标题</h1>
+					<p>正文</p>
+					<pre><code class="language-js">console.log(1)</code></pre>
+				</div>
+			</div>
+			<script>console.log('x')</script>
+			<!--after-->
+		`;
+
+		const nodes = htmlToTelegraphNodes(html);
+		const serialized = JSON.stringify(nodes);
+		expect(serialized).toContain('"tag":"pre"');
+		expect(serialized).toContain('console.log(1)');
+		expect(serialized).toContain('正文');
 	});
 });

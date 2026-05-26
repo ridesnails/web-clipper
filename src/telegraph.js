@@ -63,7 +63,7 @@ export function markdownToTelegraphNodes(markdown) {
 export function buildTelegraphNodes({ html = '', markdown = '', summary = '', tags = [] }) {
 	const bodyHtml = String(html || '').trim();
 	if (bodyHtml) {
-		return htmlToTelegraphNodes(buildTelegraphHtml({ body: bodyHtml, summary, tags }));
+		return htmlToTelegraphNodes(buildTelegraphHtml({ body: extractTelegraphContentHtml(bodyHtml), summary, tags }));
 	}
 
 	const blocks = [];
@@ -106,6 +106,19 @@ export function htmlToTelegraphNodes(html) {
 	return compactNodes(nodes);
 }
 
+export function extractTelegraphContentHtml(html) {
+	if (!html || !html.trim()) return '';
+	const { document } = parseHTML(`<!doctype html><html><body>${html}</body></html>`);
+	const selectors = ['#VPContent .vp-doc', 'main .vp-doc', 'article .vp-doc', '.theme-default-content', 'main article', 'article', '[role="main"]', 'main'];
+
+	for (const selector of selectors) {
+		const node = document.querySelector(selector);
+		if (node?.innerHTML?.trim()) return node.innerHTML;
+	}
+
+	return document.body?.innerHTML || html;
+}
+
 /* ─── 内部实现 ─── */
 
 /**
@@ -141,6 +154,7 @@ function preprocessTables(markdown) {
 }
 
 function domToNode(element) {
+	if (!element) return null;
 	if (element.nodeType === 3) {
 		if (!element.nodeValue) return null;
 		const parentTag = element.parentElement?.tagName?.toLowerCase();
@@ -154,6 +168,7 @@ function domToNode(element) {
 		}
 		return element.nodeValue;
 	}
+	if (element.nodeType !== 1) return null;
 
 	const rawTag = element.tagName.toLowerCase();
 	const tag = normalizeTag(rawTag);
