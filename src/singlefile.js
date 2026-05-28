@@ -158,6 +158,9 @@ function htmlFragmentToMarkdown(articleHtml, options = {}) {
 	return withDomGlobals(window, () => turndown.turndown(root.innerHTML || normalizedHtml).trim());
 }
 
+// Temporarily patches globalThis with linkedom's DOM globals so that Readability
+// and Turndown can access Node constants etc. Safe because the callback MUST be
+// synchronous — no await points means no microtask interleaving in Workers.
 function withDomGlobals(window, fn) {
 	const keys = ['window', 'document', 'Node', 'NodeFilter', 'HTMLElement', 'HTMLImageElement', 'HTMLAnchorElement', 'Text', 'DOMParser'];
 	const previous = new Map();
@@ -170,7 +173,11 @@ function withDomGlobals(window, fn) {
 	}
 
 	try {
-		return fn();
+		const result = fn();
+		if (result && typeof result.then === 'function') {
+			throw new Error('withDomGlobals callback must be synchronous');
+		}
+		return result;
 	} finally {
 		for (const key of keys) {
 			if (previous.get(key) === undefined) {
