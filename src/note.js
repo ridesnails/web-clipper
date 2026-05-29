@@ -73,6 +73,7 @@ function formatClipLogTime(date) {
 function describeClipMethod(clipMethod) {
 	if (clipMethod === 'telegram') return 'telegram';
 	if (clipMethod === 'singlefile') return 'singlefile';
+	if (clipMethod === 'markdown') return 'markdown';
 	return 'post';
 }
 

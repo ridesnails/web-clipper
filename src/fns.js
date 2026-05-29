@@ -90,6 +90,28 @@ async function findExistingNoteByUrl({ url, env }) {
 	return null;
 }
 
+export async function fetchFnsFileContent({ path, env }) {
+	const note = await getFnsNote({ path, env });
+	return note.content;
+}
+
+export async function saveFileToFns({ path, content, env }) {
+	const res = await fetch(`${env.FNS_BASE}/api/note`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${env.FNS_TOKEN}`,
+			'Content-Type': 'application/json',
+		},
+		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
+		body: JSON.stringify({ vault: env.FNS_VAULT, path, content }),
+	});
+	const data = await safeJson(res);
+	if (!res.ok || !data?.status) {
+		throw new Error(JSON.stringify(data || { status: false, message: `HTTP ${res.status}` }));
+	}
+	return data.data || { path };
+}
+
 async function getFnsNote({ path, env }) {
 	const params = new URLSearchParams({ vault: env.FNS_VAULT, path });
 	const res = await fetch(`${env.FNS_BASE}/api/note?${params.toString()}`, {

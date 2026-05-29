@@ -2,7 +2,7 @@ import { sendPhoto, sendMessage, getFile } from './telegram.js';
 import { parseSingleFileUpload } from './singlefile.js';
 import { buildTelegraphNodes, createPage } from './telegraph.js';
 import { fetchArticleFromUrl, extractTitle, cleanJinaBody, stripEmptyLinks } from './jina.js';
-import { writeToFns } from './fns.js';
+import { writeToFns, fetchFnsFileContent, saveFileToFns } from './fns.js';
 import { makeSlug, buildNote } from './note.js';
 import { generateAiMetadata } from './ai.js';
 import { isValidUrl, escapeHtml, escapeHtmlAttr, getHostname, resolveUrl, formatTagLine } from './utils.js';
@@ -30,6 +30,10 @@ const worker = {
 			return handleImageProxy(request, env);
 		}
 
+		if (pathname === '/html-view') {
+			return handleHtmlView(request, env);
+		}
+
 		if (pathname === '/telegram-webhook') {
 			return handleTelegramWebhook(request, env);
 		}
@@ -49,6 +53,9 @@ const worker = {
 
 		if (pathname === '/upload-html') {
 			return handleSingleFileClipRequest(request, env);
+		}
+		if (pathname === '/save-md') {
+			return handleSaveMdRequest(request, env);
 		}
 		return handleJsonClipRequest(request, env);
 	},
@@ -121,7 +128,79 @@ async function handleSingleFileClipRequest(request, env) {
 	}
 }
 
-async function clipArticle({ requestUrl, article, env, clipMethod = 'url' }) {
+async function handleSaveMdRequest(request, env) {
+	let body;
+	try {
+		body = await request.json();
+	} catch {
+		return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
+	}
+
+	const title = String(body.title || '').trim();
+	const content = String(body.content || '').trim();
+	if (!title) return Response.json({ error: "Missing 'title' field" }, { status: 400, headers: corsHeaders(env) });
+	if (!content) return Response.json({ error: "Missing 'content' field" }, { status: 400, headers: corsHeaders(env) });
+
+	const conversationId = String(body.conversation_id || '').trim();
+	const extraTags = Array.isArray(body.tags) ? body.tags.map(String).filter(Boolean) : [];
+	const html = String(body.html || '').trim();
+
+	const slug = makeSlug(title);
+	const now = new Date();
+	const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+	const timestamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+	const convUrl = conversationId ? `ai://conv/${conversationId}` : `ai://conv/${timestamp}`;
+
+	let markdownBody = content;
+	const extraResponseFields = {};
+
+	if (html) {
+		const htmlPath = `${env.CLIP_FOLDER}/${yyyymm}/${timestamp}-${slug}.html`;
+		const publicBaseUrl = resolvePublicBaseUrl(request.url, env.PUBLIC_BASE_URL);
+		const htmlViewUrl = publicBaseUrl ? `${publicBaseUrl}/html-view?path=${encodeURIComponent(htmlPath)}` : '';
+
+		try {
+			await saveFileToFns({ path: htmlPath, content: html, env });
+			extraResponseFields.htmlPath = htmlPath;
+			if (htmlViewUrl) {
+				extraResponseFields.htmlViewUrl = htmlViewUrl;
+				markdownBody = `${content}\n\n---\n\n[🌐 查看 HTML 渲染版本](${htmlViewUrl})`;
+			}
+		} catch (e) {
+			console.error('HTML file save failed:', htmlPath, e.message);
+		}
+	}
+
+	return clipArticle({
+		requestUrl: request.url,
+		article: { title, url: convUrl, markdownBody, sourceHtml: '' },
+		env,
+		clipMethod: 'markdown',
+		extraTags,
+		extraResponseFields,
+	});
+}
+
+async function handleHtmlView(request, env) {
+	const path = new URL(request.url).searchParams.get('path');
+	if (!path) {
+		return new Response('Missing path parameter', { status: 400, headers: { 'Content-Type': 'text/plain' } });
+	}
+	try {
+		const content = await fetchFnsFileContent({ path, env });
+		return new Response(content, {
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'public, max-age=3600',
+				'X-Content-Type-Options': 'nosniff',
+			},
+		});
+	} catch (e) {
+		return new Response(`Not found: ${e.message}`, { status: 404, headers: { 'Content-Type': 'text/plain' } });
+	}
+}
+
+async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extraTags = [], extraResponseFields = {} }) {
 	let { title, url, markdownBody, sourceHtml } = article;
 	const slug = makeSlug(title);
 	const now = new Date();
@@ -151,7 +230,7 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url' }) {
 		}
 	}
 	const summary = aiMetadata?.summary || '';
-	const tags = aiMetadata?.tags || [];
+	const tags = [...new Set([...extraTags, ...(aiMetadata?.tags || [])])];
 	const content = buildNote({
 		title,
 		url,
@@ -214,6 +293,7 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url' }) {
 			telegraphOk,
 			telegraphUrl: telegraphData.telegraphUrl || undefined,
 			telegramMessageId: telegraphData.telegramMessageId || undefined,
+			...extraResponseFields,
 		},
 		{ headers: corsHeaders(env) }
 	);
@@ -413,7 +493,7 @@ async function notifyTelegramWebhookError(chatId, message, env) {
 }
 
 function normalizeClipMethod(value) {
-	return ['url', 'singlefile', 'telegram'].includes(value) ? value : 'url';
+	return ['url', 'singlefile', 'telegram', 'markdown'].includes(value) ? value : 'url';
 }
 
 function resolvePublicBaseUrl(requestUrl, configuredBaseUrl) {

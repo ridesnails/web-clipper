@@ -6,12 +6,13 @@
 
 ## 一眼看懂
 
-这个项目现在有 3 个正式入口：
+这个项目现在有 4 个正式入口：
 
 | 入口 | 适合场景 | 实际走法 |
 | --- | --- | --- |
 | `POST /` | 普通网页、脚本调用、快捷指令 | URL -> Jina -> 剪藏 |
 | `POST /upload-html` | SingleFile、登录态页面、强前端页面 | HTML -> 直接解析 -> 剪藏 |
+| `POST /save-md` | AI 对话、任意 Markdown 内容 | Markdown -> 直接剪藏，可附带 HTML |
 | `CLIP_BOT` | Telegram 里直接发链接 | Telegram -> 提取 URL -> 剪藏 |
 
 三种入口最后都会汇入同一条主链路：
@@ -77,7 +78,7 @@
 └─────────────────────────────┘
 ```
 
-## 三个入口
+## 四个入口
 
 ### 1. HTTP 入口：`POST /`
 
@@ -188,16 +189,114 @@
 - 对论坛贴、公众号和图片较多的页面，会尽量保留正文中的真实图片，并过滤明显的占位 SVG 图
 - 对 `data:image/...` 这类 SingleFile 内联图片，会按现有图片链路外部化成 Worker `/image-proxy` 链接，而不是把 base64 直接写进 Markdown
 
+### 4. AI 对话入口：`POST /save-md`
+
+适合：
+
+- 保存 Claude / ChatGPT / 任意 AI Agent 的对话记录
+- 保存 AI 生成的 Markdown 文档
+- 需要同时保存 HTML 渲染版本并获取可直接打开的链接
+
+请求格式：
+
+**Headers**
+
+| Name            | Required | Description        |
+| --------------- | -------- | ------------------ |
+| `Authorization` | ✅       | `Bearer <API_KEY>` |
+| `Content-Type`  | ✅       | `application/json` |
+
+**Body**
+
+```json
+{
+  "title": "Claude 对话：重构 web-clipper",
+  "content": "## User\n\n帮我分析这个项目...\n\n## Assistant\n\n...",
+  "html": "<html>...</html>",
+  "tags": ["claude", "refactor"],
+  "conversation_id": "conv_abc123"
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `title` | ✅ | 笔记标题 |
+| `content` | ✅ | Markdown 正文 |
+| `html` | ❌ | AI 生成的 HTML artifact，会单独存储并返回可访问链接 |
+| `tags` | ❌ | 标签数组，会与 AI 自动生成的标签合并 |
+| `conversation_id` | ❌ | 对话唯一 ID，用于 FNS 去重（再次保存同一对话时更新而非新建） |
+
+**成功响应**
+
+```json
+{
+  "ok": true,
+  "title": "Claude 对话：重构 web-clipper",
+  "fnsOk": true,
+  "mode": "created",
+  "path": "Clippings/2026-05/20260529T120000Z-Claude-对话.md",
+  "htmlPath": "Clippings/2026-05/20260529T120000Z-Claude-对话.html",
+  "htmlViewUrl": "https://web-clipper.<your>.workers.dev/html-view?path=...",
+  "telegraphOk": false
+}
+```
+
+`htmlPath` 和 `htmlViewUrl` 仅在请求中包含 `html` 字段时返回。`htmlViewUrl` 是可以直接在浏览器打开的链接。
+
+**行为约定：**
+
+- 跳过 Jina，直接使用传入的 Markdown 内容
+- 如果配置了 AI（`AI_API_KEY`），仍会自动生成摘要，用户传入的 `tags` 与 AI 标签合并去重
+- `conversation_id` 相同时走软更新（更新 frontmatter + 追加更新记录），不新建笔记
+- HTML 文件存储在与 Markdown 笔记相同目录，后缀为 `.html`
+
+**curl 示例**
+
+```bash
+# 仅保存 Markdown
+curl -X POST https://web-clipper.<your>.workers.dev/save-md \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Claude 对话：代码重构",
+    "content": "## User\n\n帮我重构这段代码...\n\n## Assistant\n\n好的，我来分析...",
+    "tags": ["claude", "refactor"],
+    "conversation_id": "conv_20260529_001"
+  }'
+
+# 同时保存 HTML artifact 并获取可访问链接
+curl -X POST https://web-clipper.<your>.workers.dev/save-md \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "数据分析报告",
+    "content": "## 分析结果\n\n详见 HTML 版本。",
+    "html": "<html><body><h1>分析报告</h1><canvas id=\"chart\"></canvas></body></html>",
+    "tags": ["analysis"]
+  }'
+```
+
+### `GET /html-view` — HTML 文件代理
+
+通过 `/save-md` 保存 HTML 后，响应中的 `htmlViewUrl` 即为此路由的链接。无需鉴权，可直接在浏览器打开。
+
+```
+GET /html-view?path=Clippings/2026-05/20260529T120000Z-title.html
+```
+
+Worker 从 FNS 拉取文件内容，以 `Content-Type: text/html` 返回，浏览器直接渲染。
+
 ## 剪藏主链路
 
-不管入口来自 `POST /`、`POST /upload-html` 还是 `CLIP_BOT`，真正执行的都是同一条链路：
+不管入口来自 `POST /`、`POST /upload-html`、`POST /save-md` 还是 `CLIP_BOT`，真正执行的都是同一条链路：
 
 1. 标准化文章内容
 2. URL 入口走 `Jina`
 3. SingleFile 入口走上传 HTML 解析
-4. 生成 Markdown 和 frontmatter
-5. FNS 和 Telegraph / Telegram 并行执行
-6. 任一链路成功都尽量返回结果
+4. Markdown 入口直接使用传入内容
+5. 生成 Markdown 和 frontmatter
+6. FNS 和 Telegraph / Telegram 并行执行
+7. 任一链路成功都尽量返回结果
 
 ### URL 去重与软更新
 

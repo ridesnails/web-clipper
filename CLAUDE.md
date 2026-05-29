@@ -17,19 +17,22 @@ Vitest runs under `environment: 'node'` (see `vitest.config.js`) — not the Clo
 
 ## Architecture
 
-Single Worker (`src/index.js`) with three entry points that all funnel into one shared pipeline.
+Single Worker (`src/index.js`) with four entry points that all funnel into one shared pipeline.
 
 ```
 POST /                  ──┐
-POST /upload-html       ──┼──► clipArticle() ──► Promise.allSettled([
+POST /upload-html       ──┤
+POST /save-md           ──┼──► clipArticle() ──► Promise.allSettled([
 POST /telegram-webhook  ──┘                        writeToFns(),
                                                    pushTelegraphAndTelegram()
                                                  ])
+GET  /html-view              (no auth, proxies HTML files from FNS)
 ```
 
 - `handleJsonClipRequest` — URL → Jina Reader (`r.jina.ai`) → markdown.
-- `handleSingleFileClipRequest` — multipart HTML upload → `parseSingleFileUpload` (Readability + linkedom + vendored Turndown) → markdown.
-- `handleTelegramWebhook` — extracts first URL from a Telegram message, then re-enters the worker through a synthetic `POST /` request (so it reuses the JSON path verbatim).
+- `handleSingleFileClipRequest` — multipart HTML upload → `parseSingleFileUpload` → markdown.
+- `handleSaveMdRequest` — accepts `{ title, content, html?, tags?, conversation_id? }` directly; skips Jina. If `html` is provided, saves it as a `.html` file in FNS and returns `htmlViewUrl`.
+- `handleTelegramWebhook` — extracts first URL from Telegram message, calls `fetchArticleFromUrl` + `clipArticle` directly.
 
 `clipArticle` is the convergence point. It builds the slug, frontmatter, and note body, optionally calls AI for summary/tags, then runs FNS write + Telegraph/Telegram push **in parallel**. Either side may fail independently; only when *both* fail does the response become 502.
 
@@ -52,8 +55,13 @@ Telegraph's native upload is gone, so images flow through Telegram:
 
 | File | Role |
 | --- | --- |
-| `src/index.js` | Routing, auth, pipeline orchestration, FNS API client, Telegram webhook, image proxy. |
+| `src/index.js` | Routing, auth, pipeline orchestration, image proxy, html-view proxy. |
+| `src/fns.js` | FNS API client: `writeToFns` (dedup + soft-update), `saveFileToFns` (direct write, used for HTML files), `fetchFnsFileContent` (used by `/html-view`). |
 | `src/singlefile.js` | SingleFile HTML → article markdown via Readability + linkedom + Turndown. Has a per-host preserve list (e.g. nodeseek) and SVG-placeholder filtering. |
+| `src/jina.js` | Jina Reader fetcher with retry logic. Also exports `extractTitle`, `cleanJinaBody`, `stripEmptyLinks`. |
+| `src/note.js` | `buildNote` (frontmatter + body template), `makeSlug`, `buildClipUpdateAppend`. |
+| `src/ai.js` | AI metadata generation (summary + tags) via OpenAI-compatible API. |
+| `src/utils.js` | Shared helpers: `isValidUrl`, `escapeHtml`, `formatTagLine`, etc. |
 | `src/telegraph.js` | HTML/markdown → Telegraph Node tree + `createPage` API. |
 | `src/telegram.js` | `sendPhoto` / `sendMessage` / `getFile` wrappers around Bot API. Uses `IMG_BOT` for images and `CLIP_BOT` for notifications, falling back to legacy `TELEGRAM_BOT_TOKEN`. |
 | `src/code-blocks.js` | Fenced-code helpers (language extraction, fence sizing) shared by Turndown rules. |
