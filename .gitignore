@@ -166,6 +166,7 @@ dist
 .wrangler/
 .ace-tool/
 .snow/
+!.snow/skills/
 
 # local clipper debug artifacts
 .wrangler-build-explicit/
