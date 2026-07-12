@@ -2,6 +2,7 @@
 import { marked } from 'marked';
 import { parseHTML } from 'linkedom';
 import { normalizeCodeBlocksHtml } from './code-blocks.js';
+import { fetchWithTimeout } from './http.js';
 
 const SUPPORTED_TAGS = new Set(['a', 'aside', 'b', 'blockquote', 'br', 'code', 'em', 'figcaption', 'figure', 'h3', 'h4', 'hr', 'i', 'iframe', 'img', 'li', 'ol', 'p', 'pre', 's', 'strong', 'u', 'ul', 'video']);
 const VOID_TAGS = new Set(['br', 'hr', 'img', 'iframe', 'video']);
@@ -15,16 +16,20 @@ const BLOCK_TAGS = new Set(['p', 'blockquote', 'pre', 'ul', 'ol', 'li', 'h3', 'h
  * @returns {Promise<{url: string, path: string, title: string}>}
  */
 export async function createPage(title, contentNodes, env) {
-	const res = await fetch('https://api.telegra.ph/createPage', {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({
-			access_token: env.TELEGRAPH_ACCESS_TOKEN,
-			title,
-			content: JSON.stringify(contentNodes),
-			return_content: false,
-		}),
-	});
+	const res = await fetchWithTimeout(
+		'https://api.telegra.ph/createPage',
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				access_token: env.TELEGRAPH_ACCESS_TOKEN,
+				title,
+				content: JSON.stringify(contentNodes),
+				return_content: false,
+			}),
+		},
+		{ timeoutMs: 20000, retries: 0 }
+	);
 
 	if (!res.ok) {
 		throw new Error(`Telegraph createPage failed: ${res.status}`);
@@ -59,21 +64,35 @@ export function markdownToTelegraphNodes(markdown) {
  * Telegraph 内容构建策略：
  * 1. 优先直接使用 HTML 转 Node
  * 2. 只有拿不到 HTML 时，才退回 Markdown fallback
+ * 页头统一：原文链接 → 摘要/标签 aside → hr → 正文
  */
-export function buildTelegraphNodes({ html = '', markdown = '', summary = '', tags = [] }) {
+export function buildTelegraphNodes({ html = '', markdown = '', summary = '', tags = [], sourceUrl = '' }) {
 	const bodyHtml = String(html || '').trim();
 	if (bodyHtml) {
-		return htmlToTelegraphNodes(buildTelegraphHtml({ body: extractTelegraphContentHtml(bodyHtml), summary, tags }));
+		return htmlToTelegraphNodes(
+			buildTelegraphHtml({
+				body: extractTelegraphContentHtml(bodyHtml),
+				summary,
+				tags,
+				sourceUrl,
+			})
+		);
 	}
 
 	const blocks = [];
-	if (summary) {
-		blocks.push('#### 摘要', '', summary.trim(), '');
+	const src = String(sourceUrl || '').trim();
+	if (src) {
+		blocks.push(`[原文链接](${src})`, '');
 	}
-
+	if (summary) {
+		blocks.push('> **摘要**', `> ${summary.trim().replace(/\n+/g, ' ')}`, '');
+	}
 	const tagLine = formatTagLine(tags);
 	if (tagLine) {
 		blocks.push(`标签：${tagLine}`, '');
+	}
+	if (src || summary || tagLine) {
+		blocks.push('---', '');
 	}
 
 	const bodyMarkdown = String(markdown || '').trim();
@@ -268,16 +287,37 @@ function escapeHtml(str) {
 	return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function buildTelegraphHtml({ body, summary, tags = [] }) {
+/**
+ * Build a cleaner Telegraph prefix:
+ * - source link at top
+ * - summary + tags inside <aside> with blockquote emphasis
+ * - <hr> before body for visual separation
+ */
+export function buildTelegraphHtml({ body, summary, tags = [], sourceUrl = '' }) {
 	const prefix = [];
-	if (summary) {
-		prefix.push(`<h4>摘要</h4>`, `<p>${escapeHtml(summary)}</p>`);
+	const src = String(sourceUrl || '').trim();
+	if (src) {
+		prefix.push(`<p><a href="${escapeAttr(src)}">原文链接</a></p>`);
+	}
+
+	const asideParts = [];
+	const cleanSummary = String(summary || '').trim();
+	if (cleanSummary) {
+		asideParts.push(`<h4>摘要</h4>`, `<blockquote><p>${escapeHtml(cleanSummary)}</p></blockquote>`);
 	}
 	const tagLine = formatTagLine(tags);
 	if (tagLine) {
-		prefix.push(`<p>标签：${escapeHtml(tagLine)}</p>`);
+		asideParts.push(`<p><em>标签：${escapeHtml(tagLine)}</em></p>`);
 	}
-	if (!prefix.length) return body;
+	if (asideParts.length) {
+		prefix.push(`<aside>${asideParts.join('')}</aside>`);
+	}
+
+	if (prefix.length) {
+		prefix.push('<hr>');
+	}
+
+	if (!prefix.length) return body || '';
 	return `${prefix.join('\n')}\n${body || ''}`;
 }
 

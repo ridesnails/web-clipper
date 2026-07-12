@@ -1,5 +1,7 @@
 // Telegram Bot API 封装
-// 注：此为占位实现，供测试使用。真实实现由 backend-dev teammate 提供。
+import { fetchWithTimeout } from './http.js';
+
+const TG_TIMEOUT_MS = 15000;
 
 function resolveImageBotToken(env) {
 	return env.IMG_BOT || env.TELEGRAM_BOT_TOKEN;
@@ -30,11 +32,14 @@ export async function sendPhoto(fileBuffer, fileName, env) {
 	const blob = new Blob([fileBuffer], { type: 'image/jpeg' });
 	formData.append('photo', blob, fileName);
 
-	const res = await fetch(`https://api.telegram.org/bot${resolveImageBotToken(env)}/sendPhoto`, {
-		method: 'POST',
-		body: formData,
-		signal: AbortSignal.timeout(15000),
-	});
+	const res = await fetchWithTimeout(
+		`https://api.telegram.org/bot${resolveImageBotToken(env)}/sendPhoto`,
+		{
+			method: 'POST',
+			body: formData,
+		},
+		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 },
+	);
 
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({}));
@@ -77,12 +82,15 @@ export async function sendMessage(text, chatId, env, options = {}) {
 			prefer_large_media: true,
 		};
 	}
-	const res = await fetch(`https://api.telegram.org/bot${resolveClipBotToken(env)}/sendMessage`, {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify(payload),
-		signal: AbortSignal.timeout(15000),
-	});
+	const res = await fetchWithTimeout(
+		`https://api.telegram.org/bot${resolveClipBotToken(env)}/sendMessage`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload),
+		},
+		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 },
+	);
 
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({}));
@@ -104,9 +112,11 @@ export async function sendMessage(text, chatId, env, options = {}) {
  * @returns {Promise<{file_path: string, file_url: string}>}
  */
 export async function getFile(fileId, env) {
-	const res = await fetch(`https://api.telegram.org/bot${resolveImageBotToken(env)}/getFile?file_id=${encodeURIComponent(fileId)}`, {
-		signal: AbortSignal.timeout(15000),
-	});
+	const res = await fetchWithTimeout(
+		`https://api.telegram.org/bot${resolveImageBotToken(env)}/getFile?file_id=${encodeURIComponent(fileId)}`,
+		{},
+		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 },
+	);
 
 	if (!res.ok) {
 		const err = await res.json().catch(() => ({}));

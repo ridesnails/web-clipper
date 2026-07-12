@@ -1,13 +1,31 @@
 import { isValidUrl } from './utils.js';
+import { fetchWithTimeout } from './http.js';
+
+// 平台通用占位标题：jina 抓取微信等站点遇登录/校验页时返回的无意义标题，需跳过
+const PLACEHOLDER_TITLES = [
+	'Weixin Official Accounts Platform',
+	'微信公众平台',
+	'微信公众号',
+];
+
+function isPlaceholderTitle(t) {
+	if (!t) return true;
+	return PLACEHOLDER_TITLES.some((p) => t === p || t.includes(p));
+}
 
 export function extractTitle(md) {
 	const titleMatch = md.match(/^Title:\s*(.+)$/m);
 	if (titleMatch) {
 		const t = titleMatch[1].trim();
-		if (t && !t.startsWith('http')) return t;
+		if (t && !t.startsWith('http') && !isPlaceholderTitle(t)) return t;
 	}
-	const h1Match = md.match(/^#\s+(.+)$/m);
-	if (h1Match) return h1Match[1].trim();
+	// 降级：Title 字段缺失或为占位符时，扫描正文 h1~h4，取首个非占位标题
+	// （微信文章真实标题常在 h2/h3，而 h1 多为平台占位）
+	const headingMatches = md.matchAll(/^#{1,4}\s+(.+)$/gm);
+	for (const m of headingMatches) {
+		const t = m[1].trim();
+		if (t && !isPlaceholderTitle(t)) return t;
+	}
 	return null;
 }
 
@@ -36,25 +54,22 @@ export async function fetchArticleFromUrl(url, env) {
 	}
 
 	let jinaRes;
-	let lastErr;
-	for (let attempt = 0; attempt <= 2; attempt++) {
-		if (attempt > 0) {
-			const delay = attempt === 1 ? 1000 : 2000;
-			await new Promise((r) => setTimeout(r, delay));
-		}
-		jinaRes = await fetch(`https://r.jina.ai/${url}`, {
-			headers: jinaHeaders,
-			signal: AbortSignal.timeout(25000),
-		});
-		if (jinaRes.ok) break;
-
+	try {
+		jinaRes = await fetchWithTimeout(
+			`https://r.jina.ai/${url}`,
+			{ headers: jinaHeaders },
+			{ timeoutMs: 25000, retries: 2, delaysMs: [1000, 2000], retryOnStatuses: [429, 500, 502, 503, 504] }
+		);
+	} catch (error) {
+		const detail = error?.responseText || error?.message || String(error);
+		const status = error?.status ? `${error.status} ` : '';
+		console.error('Jina fetch failed:', url, status, detail);
+		throw new Error(`Jina fetch failed: ${status}${detail}`);
+	}
+	if (!jinaRes.ok) {
 		const errText = await jinaRes.text();
-		lastErr = `${jinaRes.status} ${errText}`;
 		console.error('Jina returned non-200:', url, jinaRes.status, errText);
-		const shouldRetry = jinaRes.status === 429 || jinaRes.status >= 500;
-		if (!shouldRetry || attempt === 2) {
-			throw new Error(`Jina fetch failed: ${lastErr}`);
-		}
+		throw new Error(`Jina fetch failed: ${jinaRes.status} ${errText}`);
 	}
 
 	const markdown = await jinaRes.text();

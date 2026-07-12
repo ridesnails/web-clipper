@@ -1041,7 +1041,10 @@ describe('SingleFile upload entry', () => {
 		const telegraphPayload = JSON.parse(telegraphCall[1].body);
 		const serializedNodes = JSON.stringify(JSON.parse(telegraphPayload.content));
 		expect(serializedNodes).toContain('Body from uploaded file.');
-		expect(serializedNodes).not.toContain('https://example.com/article');
+		// 前缀会挂原文链接；正文仍应来自上传 HTML，而非再抓取源站全文
+		expect(serializedNodes).toContain('原文链接');
+		expect(serializedNodes).toContain('https://example.com/article');
+		expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('r.jina.ai'))).toBe(false);
 	});
 
 	it('POST /upload-html for nodeseek-like rich article - keeps real images but filters svg placeholders', async () => {

@@ -335,7 +335,13 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 		console.warn('Skip Telegraph image proxy replacement: no public base URL available');
 	}
 
-	const nodes = buildTelegraphNodes({ html: telegraphHtml, markdown: cleanBody, summary, tags });
+	const nodes = buildTelegraphNodes({
+		html: telegraphHtml,
+		markdown: cleanBody,
+		summary,
+		tags,
+		sourceUrl: articleUrl,
+	});
 
 	const pageResult = await createPage(title, nodes, env);
 	const telegraphUrl = pageResult.url;

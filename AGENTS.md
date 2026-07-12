@@ -60,6 +60,10 @@
 - ⚡ **快** —— 单次剪藏典型耗时 3-8 秒（取决于源站响应速度）
 - 🧪 **可测试** —— Vitest + `@cloudflare/vitest-pool-workers` 提供 Workers 运行时仿真测试
 
+## Chat Routing Convention
+
+在这个仓库的对话上下文中，如果用户单独发送一个裸 `http/https` 链接，默认将其视为剪藏请求，而不是普通参考文本。
+
 ## Getting Started
 
 ### Prerequisites

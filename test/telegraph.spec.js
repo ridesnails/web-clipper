@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createPage, extractTelegraphContentHtml, htmlToTelegraphNodes, markdownToTelegraphNodes } from '../src/telegraph.js';
+import {
+	buildTelegraphHtml,
+	buildTelegraphNodes,
+	createPage,
+	extractTelegraphContentHtml,
+	htmlToTelegraphNodes,
+	markdownToTelegraphNodes,
+} from '../src/telegraph.js';
 
 const mockEnv = {
 	TELEGRAPH_ACCESS_TOKEN: 'test-access-token-12345',
@@ -292,5 +299,40 @@ console.log(a);</code></pre></td>
 		expect(serialized).toContain('"tag":"pre"');
 		expect(serialized).toContain('console.log(1)');
 		expect(serialized).toContain('正文');
+	});
+});
+
+describe('buildTelegraphHtml / buildTelegraphNodes prefix', () => {
+	it('prefix 含原文链接、摘要 aside、标签与 hr', () => {
+		const html = buildTelegraphHtml({
+			body: '<p>正文</p>',
+			summary: '这是摘要',
+			tags: ['clip', 'web'],
+			sourceUrl: 'https://example.com/article',
+		});
+		expect(html).toContain('<a href="https://example.com/article">原文链接</a>');
+		expect(html).toContain('<aside>');
+		expect(html).toContain('这是摘要');
+		expect(html).toContain('标签：');
+		expect(html).toContain('<hr>');
+		expect(html).toContain('<p>正文</p>');
+	});
+
+	it('无 prefix 字段时只返回 body', () => {
+		expect(buildTelegraphHtml({ body: '<p>only</p>' })).toBe('<p>only</p>');
+	});
+
+	it('buildTelegraphNodes 输出原文链接节点', () => {
+		const nodes = buildTelegraphNodes({
+			html: '<p>body</p>',
+			summary: 'sum',
+			tags: ['t1'],
+			sourceUrl: 'https://example.com/x',
+		});
+		const serialized = JSON.stringify(nodes);
+		expect(serialized).toContain('原文链接');
+		expect(serialized).toContain('https://example.com/x');
+		expect(serialized).toContain('"tag":"aside"');
+		expect(serialized).toContain('"tag":"hr"');
 	});
 });

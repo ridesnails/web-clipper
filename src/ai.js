@@ -1,3 +1,5 @@
+import { fetchWithTimeout } from './http.js';
+
 const AI_REQUEST_TIMEOUT_MS = 20000;
 
 export async function generateAiMetadata({ title, url, body, env }) {
@@ -14,23 +16,26 @@ export async function generateAiMetadata({ title, url, body, env }) {
 		'正文：',
 		body.slice(0, 12000),
 	].join('\n');
-	const res = await fetch(`${baseUrl}/chat/completions`, {
-		method: 'POST',
-		headers: {
-			Authorization: `Bearer ${env.AI_API_KEY}`,
-			'Content-Type': 'application/json',
+	const res = await fetchWithTimeout(
+		`${baseUrl}/chat/completions`,
+		{
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${env.AI_API_KEY}`,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				model,
+				temperature: 0.2,
+				response_format: { type: 'json_object' },
+				messages: [
+					{ role: 'system', content: 'You generate concise article metadata in JSON.' },
+					{ role: 'user', content: prompt },
+				],
+			}),
 		},
-		signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
-		body: JSON.stringify({
-			model,
-			temperature: 0.2,
-			response_format: { type: 'json_object' },
-			messages: [
-				{ role: 'system', content: 'You generate concise article metadata in JSON.' },
-				{ role: 'user', content: prompt },
-			],
-		}),
-	});
+		{ timeoutMs: AI_REQUEST_TIMEOUT_MS, retries: 1, delaysMs: [1000], retryOnStatuses: [429, 500, 502, 503, 504] }
+	);
 	if (!res.ok) {
 		const errText = await res.text();
 		throw new Error(`AI metadata failed: ${res.status} ${errText}`);

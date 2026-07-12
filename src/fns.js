@@ -1,6 +1,15 @@
 import { buildClipUpdateAppend } from './note.js';
+import { fetchWithTimeout } from './http.js';
 
 const FNS_REQUEST_TIMEOUT_MS = 15000;
+
+async function fnsFetch(url, init = {}) {
+	return fetchWithTimeout(url, init, {
+		timeoutMs: FNS_REQUEST_TIMEOUT_MS,
+		retries: 1,
+		delaysMs: [800],
+	});
+}
 
 export async function writeToFns({ path, content, env, url, summary, tags, clipMethod, clippedAt }) {
 	const existing = await findExistingNoteByUrl({ url, env });
@@ -31,13 +40,12 @@ export async function writeToFns({ path, content, env, url, summary, tags, clipM
 }
 
 async function createFnsNote({ path, content, env }) {
-	const fnsRes = await fetch(`${env.FNS_BASE}/api/note`, {
+	const fnsRes = await fnsFetch(`${env.FNS_BASE}/api/note`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
-		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({ vault: env.FNS_VAULT, path, content }),
 	});
 	const fnsData = await safeJson(fnsRes);
@@ -58,9 +66,8 @@ async function findExistingNoteByUrl({ url, env }) {
 		sortBy: 'mtime',
 		sortOrder: 'desc',
 	});
-	const res = await fetch(`${env.FNS_BASE}/api/notes?${params.toString()}`, {
+	const res = await fnsFetch(`${env.FNS_BASE}/api/notes?${params.toString()}`, {
 		headers: { Authorization: `Bearer ${env.FNS_TOKEN}` },
-		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 	});
 	const data = await safeJson(res);
 	if (!res.ok || !data?.status) {
@@ -96,13 +103,12 @@ export async function fetchFnsFileContent({ path, env }) {
 }
 
 export async function saveFileToFns({ path, content, env }) {
-	const res = await fetch(`${env.FNS_BASE}/api/note`, {
+	const res = await fnsFetch(`${env.FNS_BASE}/api/note`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
-		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({ vault: env.FNS_VAULT, path, content }),
 	});
 	const data = await safeJson(res);
@@ -114,9 +120,8 @@ export async function saveFileToFns({ path, content, env }) {
 
 async function getFnsNote({ path, env }) {
 	const params = new URLSearchParams({ vault: env.FNS_VAULT, path });
-	const res = await fetch(`${env.FNS_BASE}/api/note?${params.toString()}`, {
+	const res = await fnsFetch(`${env.FNS_BASE}/api/note?${params.toString()}`, {
 		headers: { Authorization: `Bearer ${env.FNS_TOKEN}` },
-		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 	});
 	const data = await safeJson(res);
 	if (!res.ok || !data?.status || !data?.data?.content) {
@@ -126,13 +131,12 @@ async function getFnsNote({ path, env }) {
 }
 
 async function patchFnsFrontmatter({ path, updates, env }) {
-	const res = await fetch(`${env.FNS_BASE}/api/note/frontmatter`, {
+	const res = await fnsFetch(`${env.FNS_BASE}/api/note/frontmatter`, {
 		method: 'PATCH',
 		headers: {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
-		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({ vault: env.FNS_VAULT, path, updates }),
 	});
 	const data = await safeJson(res);
@@ -142,13 +146,12 @@ async function patchFnsFrontmatter({ path, updates, env }) {
 }
 
 async function appendFnsNote({ path, content, env }) {
-	const res = await fetch(`${env.FNS_BASE}/api/note/append`, {
+	const res = await fnsFetch(`${env.FNS_BASE}/api/note/append`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${env.FNS_TOKEN}`,
 			'Content-Type': 'application/json',
 		},
-		signal: AbortSignal.timeout(FNS_REQUEST_TIMEOUT_MS),
 		body: JSON.stringify({ vault: env.FNS_VAULT, path, content }),
 	});
 	const data = await safeJson(res);
@@ -162,9 +165,35 @@ function extractClipCount(content) {
 	return match ? Number(match[1]) || 0 : 0;
 }
 
-function noteContainsUrl(content, url) {
+/**
+ * Only treat a note as a match when frontmatter has an exact `url:` field
+ * equal to the clipped URL. Avoid loose body/text includes which can
+ * false-positive on notes that merely mention the URL.
+ *
+ * Exported for unit tests.
+ * @param {string} content
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function noteContainsUrl(content, url) {
+	const target = String(url || '').trim();
+	if (!target) return false;
+
 	const text = String(content || '');
-	return text.includes(`url: ${url}`) || text.includes(`[原文链接](${url})`);
+	const fmMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+	const frontmatter = fmMatch ? fmMatch[1] : text;
+
+	for (const line of frontmatter.split(/\r?\n/)) {
+		const match = line.match(/^url:\s*(.+?)\s*$/);
+		if (!match) continue;
+		const raw = match[1].trim();
+		const unquoted =
+			(raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))
+				? raw.slice(1, -1)
+				: raw;
+		if (unquoted === target) return true;
+	}
+	return false;
 }
 
 async function safeJson(response) {
