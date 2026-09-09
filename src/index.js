@@ -1,4 +1,6 @@
 import { sendPhoto, sendMessage, getFile } from './telegram.js';
+import { signParam, verifyParam, timingSafeEqualStrings } from './signing.js';
+import { isPrivateHostname, isSsrfSafeUrl } from './ssrf.js';
 import { parseSingleFileUpload } from './singlefile.js';
 import { buildTelegraphNodes, createPage, editPage, TelegraphPageNotFoundError } from './telegraph.js';
 import { getClipRecord, putClipRecord } from './idempotency.js';
@@ -48,8 +50,12 @@ const worker = {
 			return Response.json({ error: 'Method not allowed. Use POST.' }, { status: 405, headers: corsHeaders(env) });
 		}
 
-		const auth = request.headers.get('Authorization');
-		if (auth !== `Bearer ${env.API_KEY}`) {
+		const auth = request.headers.get('Authorization') || '';
+		if (!env.API_KEY) {
+			// Fail closed: an unset API_KEY would otherwise accept "Bearer undefined".
+			return Response.json({ error: 'Server auth not configured (set API_KEY)' }, { status: 500, headers: corsHeaders(env) });
+		}
+		if (!timingSafeEqualStrings(auth, `Bearer ${env.API_KEY}`)) {
 			return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(env) });
 		}
 
@@ -70,9 +76,13 @@ export { extractTitle, cleanJinaBody, stripEmptyLinks } from './jina.js';
 export { makeSlug, buildNote } from './note.js';
 
 async function handleImageProxy(request, env) {
-	const fileId = new URL(request.url).searchParams.get('file_id');
+	const requestUrl = new URL(request.url);
+	const fileId = requestUrl.searchParams.get('file_id');
 	if (!fileId) {
 		return Response.json({ error: 'Missing file_id' }, { status: 400 });
+	}
+	if (!(await verifyParam(fileId, requestUrl.searchParams.get('sig') || '', env))) {
+		return Response.json({ error: 'Invalid or missing signature' }, { status: 403 });
 	}
 	try {
 		const fileInfo = await getFile(fileId, env);
@@ -162,7 +172,10 @@ async function handleSaveMdRequest(request, env) {
 	if (html) {
 		const htmlPath = `${env.CLIP_FOLDER}/${yyyymm}/${timestamp}-${slug}.html`;
 		const publicBaseUrl = resolvePublicBaseUrl(request.url, env.PUBLIC_BASE_URL);
-		const htmlViewUrl = publicBaseUrl ? `${publicBaseUrl}/html-view?path=${encodeURIComponent(htmlPath)}` : '';
+		const htmlViewSig = await signParam(htmlPath, env);
+		const htmlViewUrl = publicBaseUrl
+			? `${publicBaseUrl}/html-view?path=${encodeURIComponent(htmlPath)}&sig=${htmlViewSig}`
+			: '';
 
 		try {
 			await saveFileToFns({ path: htmlPath, content: html, env });
@@ -187,9 +200,13 @@ async function handleSaveMdRequest(request, env) {
 }
 
 async function handleHtmlView(request, env) {
-	const path = new URL(request.url).searchParams.get('path');
+	const requestUrl = new URL(request.url);
+	const path = requestUrl.searchParams.get('path');
 	if (!path) {
 		return new Response('Missing path parameter', { status: 400, headers: { 'Content-Type': 'text/plain' } });
+	}
+	if (!(await verifyParam(path, requestUrl.searchParams.get('sig') || '', env))) {
+		return new Response('Invalid or missing signature', { status: 403, headers: { 'Content-Type': 'text/plain' } });
 	}
 	try {
 		const content = await fetchFnsFileContent({ path, env });
@@ -353,6 +370,10 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 	for (const imageItem of imageItems) {
 		try {
 			const imgUrl = imageItem.absolute;
+			if (!isSsrfSafeUrl(imgUrl)) {
+				console.warn('SSRF guard blocked article image fetch:', imgUrl);
+				continue;
+			}
 			const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
 			if (imgRes.ok) {
 				const buffer = new Uint8Array(await imgRes.arrayBuffer());
@@ -368,7 +389,8 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 	const publicBaseUrl = resolvePublicBaseUrl(requestUrl, env.PUBLIC_BASE_URL);
 	if (publicBaseUrl) {
 		for (const mapping of imageMappings) {
-			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}`;
+			const proxySig = await signParam(mapping.file_id, env);
+			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}&sig=${proxySig}`;
 			telegraphHtml = telegraphHtml.replaceAll(mapping.raw, proxyUrl).replaceAll(mapping.absolute, proxyUrl);
 		}
 	} else if (imageMappings.length > 0) {
@@ -440,7 +462,8 @@ async function externalizeInlineImages({ requestUrl, sourceHtml, env }) {
 	const tasks = candidates.map((dataUrl) => async () => {
 		try {
 			const uploadResult = await sendPhoto(dataUrlToBytes(dataUrl), 'singlefile-image', env);
-			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(uploadResult.file_id)}`;
+			const proxySig = await signParam(uploadResult.file_id, env);
+			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(uploadResult.file_id)}&sig=${proxySig}`;
 			return { original: dataUrl, replacement: proxyUrl };
 		} catch (e) {
 			console.error('Inline image upload failed:', e.message);
@@ -576,25 +599,11 @@ function normalizePublicBaseUrl(value) {
 	}
 }
 
-function isPrivateHostname(hostname) {
-	const host = String(hostname || '')
-		.trim()
-		.toLowerCase()
-		.replace(/^\[|\]$/g, '');
-	if (!host) return true;
-	if (host === 'localhost' || host.endsWith('.localhost')) return true;
-	if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
-	if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return false;
-	const parts = host.split('.').map(Number);
-	const [a, b] = parts;
-	if (a === 10 || a === 127 || a === 0) return true;
-	if (a === 169 && b === 254) return true;
-	if (a === 172 && b >= 16 && b <= 31) return true;
-	if (a === 192 && b === 168) return true;
-	return false;
-}
-
 async function fetchSourceHtml(url) {
+	if (!isSsrfSafeUrl(url)) {
+		console.warn('SSRF guard blocked source HTML fetch:', url);
+		return '';
+	}
 	try {
 		const res = await fetch(url, {
 			headers: {

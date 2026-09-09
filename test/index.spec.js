@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker, { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks } from '../src';
 import { fetchArticleFromUrl, parseFrontmatter } from '../src/jina.js';
+import { signParam, verifyParam, timingSafeEqualStrings } from '../src/signing.js';
+import { isPrivateHostname, isSsrfSafeUrl } from '../src/ssrf.js';
 
 const mockEnv = {
 	API_KEY: 'test-api-key',
@@ -792,7 +794,7 @@ Body.`;
 		const telegraphPayload = JSON.parse(telegraphCall[1].body);
 		const telegraphNodes = JSON.parse(telegraphPayload.content);
 		const serializedNodes = JSON.stringify(telegraphNodes);
-		expect(serializedNodes).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1`);
+		expect(serializedNodes).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1&sig=`);
 		expect(serializedNodes).not.toContain('https://example.com/cover.jpg');
 		expect(serializedNodes).not.toContain('127.0.0.1:8787/image-proxy');
 	});
@@ -926,7 +928,8 @@ describe('Image proxy route', () => {
 				}),
 			);
 
-		const request = new Request('http://example.com/image-proxy?file_id=abc123');
+		const sig = await signParam('abc123', mockEnv);
+		const request = new Request(`http://example.com/image-proxy?file_id=abc123&sig=${sig}`);
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
 		await waitOnExecutionContext(ctx);
@@ -957,12 +960,34 @@ describe('Image proxy route', () => {
 			),
 		);
 
-		const request = new Request('http://example.com/image-proxy?file_id=invalid');
+		const sig = await signParam('invalid', mockEnv);
+		const request = new Request(`http://example.com/image-proxy?file_id=invalid&sig=${sig}`);
 		const ctx = createExecutionContext();
 		const response = await worker.fetch(request, mockEnv, ctx);
 		await waitOnExecutionContext(ctx);
 
 		expect(response.status).toBe(502);
+	});
+
+	it('GET /image-proxy without signature - returns 403', async () => {
+		const request = new Request('http://example.com/image-proxy?file_id=abc123');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(403);
+		expect(await response.json()).toEqual({ error: 'Invalid or missing signature' });
+	});
+
+	it('GET /image-proxy with wrong signature - returns 403', async () => {
+		const request = new Request(
+			`http://example.com/image-proxy?file_id=abc123&sig=${await signParam('other-file', mockEnv)}`,
+		);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(403);
 	});
 });
 
@@ -1233,7 +1258,7 @@ describe('SingleFile upload entry', () => {
 
 		expect(response.status).toBe(200);
 		const payload = JSON.parse(fetchMock.mock.calls[2][1].body);
-		expect(payload.content).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=inline-photo-file`);
+		expect(payload.content).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=inline-photo-file&sig=`);
 		expect(payload.content).not.toContain('data:image/png;base64,QUJDRA==');
 		expect(fetchMock).toHaveBeenCalledTimes(3);
 	});
@@ -1355,5 +1380,172 @@ describe('fetchArticleFromUrl unit', () => {
 		expect(article.title).toBe('Test Article');
 		expect(article.markdownBody).toContain('This is the body content.');
 		expect(article.markdownBody).not.toContain('Title:');
+	});
+});
+
+describe('Signing helper', () => {
+	const signingEnv = { API_KEY: 'test-api-key' };
+
+	it('signParam is deterministic per (value, env)', async () => {
+		const a = await signParam('Clippings/x.html', signingEnv);
+		const b = await signParam('Clippings/x.html', signingEnv);
+		expect(a).toBe(b);
+		expect(a).toMatch(/^[0-9a-f]{64}$/);
+	});
+
+	it('signParam differs for different values and keys', async () => {
+		const a = await signParam('a', signingEnv);
+		const b = await signParam('b', signingEnv);
+		const c = await signParam('a', { API_KEY: 'other-key' });
+		expect(a).not.toBe(b);
+		expect(a).not.toBe(c);
+	});
+
+	it('verifyParam accepts valid signature and rejects wrong value/sig', async () => {
+		const sig = await signParam('file-1', signingEnv);
+		await expect(verifyParam('file-1', sig, signingEnv)).resolves.toBe(true);
+		await expect(verifyParam('file-2', sig, signingEnv)).resolves.toBe(false);
+		await expect(verifyParam('file-1', `${sig}0`, signingEnv)).resolves.toBe(false);
+		await expect(verifyParam('file-1', '', signingEnv)).resolves.toBe(false);
+	});
+
+	it('verifyParam fails closed without any configured key', async () => {
+		await expect(verifyParam('file-1', 'aa', { SIGNING_SECRET: '', API_KEY: '' })).resolves.toBe(false);
+	});
+
+	it('signParam throws without any configured key', async () => {
+		let threw = false;
+		try {
+			await signParam('x', { SIGNING_SECRET: '', API_KEY: '' });
+		} catch {
+			threw = true;
+		}
+		expect(threw).toBe(true);
+	});
+
+	it('timingSafeEqualStrings compares in constant time semantics', () => {
+		expect(timingSafeEqualStrings('abc', 'abc')).toBe(true);
+		expect(timingSafeEqualStrings('abc', 'abd')).toBe(false);
+		expect(timingSafeEqualStrings('abc', 'abcd')).toBe(false);
+		expect(timingSafeEqualStrings('', '')).toBe(true);
+	});
+});
+
+describe('SSRF guard', () => {
+	it('blocks loopback / private / special IPv4 ranges', () => {
+		for (const host of [
+			'localhost', 'foo.localhost', 'foo.local', 'foo.internal',
+			'127.0.0.1', '10.0.0.1', '172.16.0.1', '172.31.255.255',
+			'192.168.1.1', '169.254.169.254', '100.64.0.1', '0.0.0.0',
+			'192.0.2.1', '198.18.0.1', '224.0.0.1', '240.0.0.1',
+			'256.1.1.1', '1.2.3',
+		]) {
+			expect(isPrivateHostname(host)).toBe(true);
+		}
+	});
+
+	it('blocks non-canonical IPv4 spellings (decimal / hex / octal / mixed)', () => {
+		expect(isPrivateHostname('2130706433')).toBe(true); // 127.0.0.1
+		expect(isPrivateHostname('0x7f000001')).toBe(true);
+		expect(isPrivateHostname('0177')).toBe(true);
+		expect(isPrivateHostname('0177.0.0.1')).toBe(true);
+		expect(isPrivateHostname('0x7f.0.0.1')).toBe(true);
+		expect(isPrivateHostname('127.1')).toBe(true);
+		expect(isSsrfSafeUrl('http://2130706433/')).toBe(false);
+		expect(isSsrfSafeUrl('http://0x7f000001/')).toBe(false);
+	});
+
+	it('blocks local IPv6 and embedded-IPv4 forms', () => {
+		expect(isPrivateHostname('::1')).toBe(true);
+		expect(isPrivateHostname('[::1]')).toBe(true);
+		expect(isPrivateHostname('::')).toBe(true);
+		expect(isPrivateHostname('0:0:0:0:0:0:0:1')).toBe(true);
+		expect(isPrivateHostname('::ffff:127.0.0.1')).toBe(true);
+		expect(isPrivateHostname('fc00::1')).toBe(true);
+		expect(isPrivateHostname('fd12:3456::1')).toBe(true);
+		expect(isPrivateHostname('fe80::1')).toBe(true);
+		expect(isPrivateHostname('::ffff:0808:0001')).toBe(true);
+	});
+
+	it('allows public hosts and rejects non-http(s) protocols / garbage', () => {
+		expect(isPrivateHostname('8.8.8.8')).toBe(false);
+		expect(isPrivateHostname('172.32.0.1')).toBe(false);
+		expect(isPrivateHostname('100.128.0.1')).toBe(false);
+		expect(isPrivateHostname('example.com')).toBe(false);
+		expect(isPrivateHostname('2606:4700::1111')).toBe(false);
+		expect(isSsrfSafeUrl('https://example.com/a')).toBe(true);
+		expect(isSsrfSafeUrl('http://8.8.8.8/x')).toBe(true);
+		expect(isSsrfSafeUrl('http://[::1]:8787/')).toBe(false);
+		expect(isSsrfSafeUrl('file:///etc/passwd')).toBe(false);
+		expect(isSsrfSafeUrl('ftp://example.com')).toBe(false);
+		expect(isSsrfSafeUrl('not a url')).toBe(false);
+	});
+});
+
+describe('HTML view route', () => {
+	it('GET /html-view without signature - returns 403', async () => {
+		const request = new Request('http://example.com/html-view?path=Clippings/2026-09/x.html');
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(403);
+		expect(await response.text()).toContain('Invalid or missing signature');
+	});
+
+	it('GET /html-view with wrong signature - returns 403', async () => {
+		const sig = await signParam('Clippings/other.html', mockEnv);
+		const request = new Request(`http://example.com/html-view?path=Clippings/2026-09/x.html&sig=${sig}`);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(403);
+	});
+
+	it('GET /html-view with valid signature - returns note content as html', async () => {
+		const htmlPath = 'Clippings/2026-09/x.html';
+		const sig = await signParam(htmlPath, mockEnv);
+		fetchMock.mockResolvedValueOnce(
+			jsonResponse({ status: true, data: { content: '<html><body>hello clip</body></html>' } }),
+		);
+		const request = new Request(`http://example.com/html-view?path=${encodeURIComponent(htmlPath)}&sig=${sig}`);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('Content-Type')).toContain('text/html');
+		expect(await response.text()).toContain('hello clip');
+	});
+
+	it('GET /html-view when FNS read fails - returns 404', async () => {
+		const htmlPath = 'Clippings/2026-09/missing.html';
+		const sig = await signParam(htmlPath, mockEnv);
+		fetchMock.mockResolvedValueOnce(jsonResponse({ status: false, error: 'nope' }));
+		const request = new Request(`http://example.com/html-view?path=${encodeURIComponent(htmlPath)}&sig=${sig}`);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(404);
+	});
+});
+
+describe('Auth hardening', () => {
+	it('POST / with unset API_KEY fails closed with 500 instead of accepting Bearer undefined', async () => {
+		const brokenEnv = { ...mockEnv, API_KEY: '' };
+		const request = new Request('http://example.com/', {
+			method: 'POST',
+			headers: { Authorization: 'Bearer undefined', 'Content-Type': 'application/json' },
+			body: JSON.stringify({ url: 'https://example.com/article' }),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, brokenEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(500);
+		const payload = await response.json();
+		expect(payload.error).toContain('API_KEY');
 	});
 });
