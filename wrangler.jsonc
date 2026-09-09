@@ -41,6 +41,16 @@
 		"binding": "BROWSER"
 	},
 	/**
+	 * KV namespace for clip idempotency records (url → {fnsPath, telegraphPath, telegraphUrl}).
+	 * Created via `wrangler kv namespace create CLIP_KV`.
+	 */
+	"kv_namespaces": [
+		{
+			"binding": "CLIP_KV",
+			"id": "799ed8d6a14846029c2e2a6c761e4f92"
+		}
+	],
+	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
 	 */

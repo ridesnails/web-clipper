@@ -49,6 +49,27 @@ function truncateTelegraphNodes(nodes, limit) {
  * @param {object} env - 环境变量，需包含 TELEGRAPH_ACCESS_TOKEN
  * @returns {Promise<{url: string, path: string, title: string}>}
  */
+/**
+ * Telegraph API root，可用 env.TELEGRAPH_API_ROOT 覆盖（镜像域如 https://api.graph.org，
+ * 供 api.telegra.ph 可达性差的地区切换；未配置时用官方域）。
+ */
+export function telegraphApiRoot(env) {
+	const root = String(env?.TELEGRAPH_API_ROOT || '').trim().replace(/\/+$/, '');
+	return root || 'https://api.telegra.ph';
+}
+
+/**
+ * 页面不存在错误：editPage 命中 PAGE_NOT_FOUND 时抛出。
+ * 调用方（clipArticle）用它区分「应回退 createPage」与其他失败。
+ */
+export class TelegraphPageNotFoundError extends Error {
+	constructor(message) {
+		super(message);
+		this.name = 'TelegraphPageNotFoundError';
+		this.code = 'TELEGRAPH_PAGE_NOT_FOUND';
+	}
+}
+
 export async function createPage(title, contentNodes, env) {
 	let nodes = Array.isArray(contentNodes) ? contentNodes.filter(Boolean) : [];
 	let serialized = JSON.stringify(nodes);
@@ -57,7 +78,7 @@ export async function createPage(title, contentNodes, env) {
 		serialized = JSON.stringify(nodes);
 	}
 	const res = await fetchWithTimeout(
-		'https://api.telegra.ph/createPage',
+		`${telegraphApiRoot(env)}/createPage`,
 		{
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -78,6 +99,52 @@ export async function createPage(title, contentNodes, env) {
 	const data = await res.json();
 	if (!data.ok) {
 		throw new Error(`Telegraph createPage failed: ${data.error}`);
+	}
+
+	return {
+		url: data.result.url,
+		path: data.result.path,
+		title: data.result.title,
+	};
+}
+
+/**
+ * 编辑已有 Telegraph 页面（幂等更新的核心）。
+ * PAGE_NOT_FOUND → TelegraphPageNotFoundError，由调用方决定回退 createPage
+ * （页面可能被手动删除，或 KV 记录过期）。
+ */
+export async function editPage(path, title, contentNodes, env) {
+	let nodes = Array.isArray(contentNodes) ? contentNodes.filter(Boolean) : [];
+	let serialized = JSON.stringify(nodes);
+	if (utf8ByteLength(serialized) > TELEGRAPH_CONTENT_LIMIT) {
+		nodes = truncateTelegraphNodes(nodes, TELEGRAPH_CONTENT_LIMIT);
+		serialized = JSON.stringify(nodes);
+	}
+	const res = await fetchWithTimeout(
+		`${telegraphApiRoot(env)}/editPage/${encodeURIComponent(path)}`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				access_token: env.TELEGRAPH_ACCESS_TOKEN,
+				title,
+				content: serialized,
+				return_content: false,
+			}),
+		},
+		{ timeoutMs: 20000, retries: 0 }
+	);
+
+	if (!res.ok) {
+		throw new Error(`Telegraph editPage failed: ${res.status}`);
+	}
+
+	const data = await res.json();
+	if (!data.ok) {
+		if (String(data.error || '').includes('PAGE_NOT_FOUND')) {
+			throw new TelegraphPageNotFoundError(`Telegraph editPage failed: ${data.error}`);
+		}
+		throw new Error(`Telegraph editPage failed: ${data.error}`);
 	}
 
 	return {

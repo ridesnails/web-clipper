@@ -605,6 +605,116 @@ describe('Telegraph + Telegram integration', () => {
 		expect(fnsPayload.content).toContain('> [!info] 📌 信息');
 	});
 
+
+	it('二次剪藏同 URL → 走 editPage 更新原页而非新建（KV 幂等记录）', async () => {
+		const sourceHtml = '<article><h1>HTML Source Heading</h1><p>Body v1.</p></article>';
+		const kvStore = new Map();
+		const kvEnv = {
+			...telegraphEnv,
+			AI_API_KEY: 'test-ai-key',
+			CLIP_KV: {
+				async get(key) {
+					return kvStore.has(key) ? kvStore.get(key) : null;
+				},
+				async put(key, value) {
+					kvStore.set(key, value);
+				},
+			},
+		};
+		const jinaRoute = {
+			match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
+			response: () => new Response(jinaMarkdown, { status: 200 }),
+		};
+		const summaryRoute = {
+			match: (url) => url.includes('/chat/completions'),
+			response: () => jsonResponse({
+				choices: [{ message: { content: JSON.stringify({ summary: '一段摘要', tags: ['云服务'] }) } }],
+			}),
+		};
+		const fnsRoutes = [
+			{ match: (url) => url.includes('/api/notes?'), response: () => fnsListResponse([]) },
+			{ match: (url) => url === `${mockEnv.FNS_BASE}/api/note`, response: () => fnsCreateResponse() },
+		];
+		const sourceRoute = {
+			match: (url) => url === 'https://example.com/article',
+			response: () => new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } }),
+		};
+		const sendMessageRoute = {
+			match: (url) => url === `https://api.telegram.org/bot${kvEnv.CLIP_BOT}/sendMessage`,
+			response: () => jsonResponse({ ok: true, result: { message_id: 100 } }),
+		};
+
+		// 第一次剪藏：无 KV 记录 → createPage，双写后落 KV 记录
+		installFetchRouter([
+			jinaRoute,
+			summaryRoute,
+			...fnsRoutes,
+			sourceRoute,
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: () => jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			sendMessageRoute,
+		]);
+
+		const ctx1 = createExecutionContext();
+		const firstResponse = await worker.fetch(createRequest({ url: 'https://example.com/article' }), kvEnv, ctx1);
+		await waitOnExecutionContext(ctx1);
+
+		expect(firstResponse.status).toBe(200);
+		const firstJson = await firstResponse.json();
+		expect(firstJson.telegraphOk).toBe(true);
+		expect(firstJson.telegraphMode).toBe('created');
+		expect(firstJson.telegraphPath).toBe('Test-05-21');
+
+		expect(kvStore.size).toBe(1);
+		const record = JSON.parse([...kvStore.values()][0]);
+		expect(record.url).toBe('https://example.com/article');
+		expect(record.telegraphPath).toBe('Test-05-21');
+		expect(record.fnsPath).toBeTruthy();
+		expect(record.updatedAt).toBeTruthy();
+
+		// 第二次剪藏：同 URL 命中 KV 记录 → editPage；故意不注册 createPage 路由，
+		// 若回退新建会因 Unexpected fetch 抛错而 telegraphOk=false，测试即失败
+		installFetchRouter([
+			jinaRoute,
+			summaryRoute,
+			...fnsRoutes,
+			sourceRoute,
+			{
+				match: (url) => url === 'https://api.telegra.ph/editPage/Test-05-21',
+				response: () => jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			sendMessageRoute,
+		]);
+
+		const ctx2 = createExecutionContext();
+		const secondResponse = await worker.fetch(createRequest({ url: 'https://example.com/article' }), kvEnv, ctx2);
+		await waitOnExecutionContext(ctx2);
+
+		expect(secondResponse.status).toBe(200);
+		const secondJson = await secondResponse.json();
+		expect(secondJson.telegraphOk).toBe(true);
+		expect(secondJson.telegraphMode).toBe('updated');
+		expect(secondJson.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
+
+		const editCall = fetchMock.mock.calls.find((call) => call[0] === 'https://api.telegra.ph/editPage/Test-05-21');
+		expect(editCall).toBeTruthy();
+		const editPayload = JSON.parse(editCall[1].body);
+		expect(editPayload.title).toBe('Test Article');
+		const createCalls = fetchMock.mock.calls.filter((call) => call[0] === 'https://api.telegra.ph/createPage');
+		expect(createCalls.length).toBe(1); // 仅第一次剪藏
+
+		const sendMessageCalls = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/sendMessage'));
+		const lastPayload = JSON.parse(sendMessageCalls[sendMessageCalls.length - 1][1].body);
+		expect(lastPayload.text).toContain('🔄 内容已更新');
+	});
 	it('POST / with localhost request origin rewrites Telegraph HTML images to PUBLIC_BASE_URL', async () => {
 		const markdownWithImage = `Title: Test Article
 URL Source: https://example.com/article

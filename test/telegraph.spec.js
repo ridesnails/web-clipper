@@ -1,12 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-	buildTelegraphHtml,
-	buildTelegraphNodes,
-	createPage,
-	extractTelegraphContentHtml,
-	htmlToTelegraphNodes,
-	markdownToTelegraphNodes,
-} from '../src/telegraph.js';
+import {buildTelegraphHtml, buildTelegraphNodes, createPage, extractTelegraphContentHtml, htmlToTelegraphNodes, markdownToTelegraphNodes, editPage, TelegraphPageNotFoundError, telegraphApiRoot} from '../src/telegraph.js';
 
 const mockEnv = {
 	TELEGRAPH_ACCESS_TOKEN: 'test-access-token-12345',
@@ -336,3 +329,109 @@ describe('buildTelegraphHtml / buildTelegraphNodes prefix', () => {
 		expect(serialized).toContain('"tag":"hr"');
 	});
 });
+
+// ---------- 阶段三：editPage 幂等更新 + API root 镜像 ----------
+
+describe('telegraphApiRoot', () => {
+	const savedFetch = globalThis.fetch;
+
+	beforeEach(() => {
+		vi.stubGlobal('fetch', vi.fn());
+	});
+
+	afterEach(() => {
+		globalThis.fetch = savedFetch;
+		vi.unstubAllGlobals();
+	});
+
+	it('未配置 TELEGRAPH_API_ROOT → 官方域 api.telegra.ph', () => {
+		expect(telegraphApiRoot({})).toBe('https://api.telegra.ph');
+		expect(telegraphApiRoot({ TELEGRAPH_API_ROOT: '' })).toBe('https://api.telegra.ph');
+	});
+
+	it('配置镜像域 → 使用镜像并剥离尾部斜杠', () => {
+		expect(telegraphApiRoot({ TELEGRAPH_API_ROOT: 'https://api.graph.org' })).toBe('https://api.graph.org');
+		expect(telegraphApiRoot({ TELEGRAPH_API_ROOT: 'https://api.graph.org/' })).toBe('https://api.graph.org');
+		expect(telegraphApiRoot({ TELEGRAPH_API_ROOT: 'https://api.graph.org//' })).toBe('https://api.graph.org');
+	});
+});
+
+describe('editPage', () => {
+	const savedFetch = globalThis.fetch;
+	const editEnv = { TELEGRAPH_ACCESS_TOKEN: 'tok' };
+
+	beforeEach(() => {
+		vi.stubGlobal('fetch', vi.fn());
+	});
+
+	afterEach(() => {
+		globalThis.fetch = savedFetch;
+		vi.unstubAllGlobals();
+	});
+
+	it('成功编辑 → POST /editPage/<path>，返回 url/path/title', async () => {
+		const mockBody = { ok: true, result: { path: 'Test-05-21', url: 'https://telegra.ph/Test-05-21', title: 'T' } };
+		const fetchMock = vi.fn().mockResolvedValueOnce(
+			new Response(JSON.stringify(mockEditBody(mockBody)), { status: 200 })
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		const result = await editPage('Test-05-21', 'T', [{ tag: 'p', children: ['x'] }], editEnv);
+		expect(result.path).toBe('Test-05-21');
+		const [calledUrl, init] = fetchMock.mock.calls[0];
+		expect(calledUrl).toBe('https://api.telegra.ph/editPage/Test-05-21');
+		expect(init.method).toBe('POST');
+		const body = JSON.parse(init.body);
+		expect(body.access_token).toBe('tok');
+		expect(body.title).toBe('T');
+		expect(JSON.parse(body.content)).toEqual([{ tag: 'p', children: ['x'] }]);
+	});
+
+	it('PAGE_NOT_FOUND → 抛 TelegraphPageNotFoundError，code=TELEGRAPH_PAGE_NOT_FOUND', async () => {
+		const fetchMock = vi.fn().mockResolvedValueOnce(
+			new Response(JSON.stringify({ ok: false, error: 'PAGE_NOT_FOUND' }), { status: 200 })
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		let caught = null;
+		try {
+			await editPage('Gone-05-21', 'T', [{ tag: 'p', children: ['x'] }], editEnv);
+		} catch (e) {
+			caught = e;
+		}
+		expect(caught).toBeInstanceOf(TelegraphPageNotFoundError);
+		expect(caught.code).toBe('TELEGRAPH_PAGE_NOT_FOUND');
+	});
+
+	it('其他 API 错误 → 普通 Error 而非 NOT_FOUND 错类', async () => {
+		const fetchMock = vi.fn().mockResolvedValueOnce(
+			new Response(JSON.stringify({ ok: false, error: 'ACCESS_TOKEN_INVALID' }), { status: 200 })
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		let caught = null;
+		try {
+			await editPage('Foo-05-21', 'T', [], editEnv);
+		} catch (e) {
+			caught = e;
+		}
+		expect(caught).toBeInstanceOf(Error);
+		expect(caught).not.toBeInstanceOf(TelegraphPageNotFoundError);
+	});
+
+	it('配置镜像域 → editPage 走镜像 URL 并对 path encodeURIComponent', async () => {
+		const fetchMock = vi.fn().mockResolvedValueOnce(
+			new Response(JSON.stringify(mockEditBody({ ok: true, result: { path: 'A B-05-21', url: 'u', title: 'T' } })), { status: 200 })
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		await editPage('A B-05-21', 'T', [], { ...editEnv, TELEGRAPH_API_ROOT: 'https://api.graph.org' });
+		const [calledUrl] = fetchMock.mock.calls[0];
+		expect(calledUrl).toBe('https://api.graph.org/editPage/A%20B-05-21');
+	});
+});
+
+function mockEditBody(body) {
+	// 让误粘贴的 mock 结构直接暴露原文，便于排错
+	return body;
+}

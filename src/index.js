@@ -1,6 +1,7 @@
 import { sendPhoto, sendMessage, getFile } from './telegram.js';
 import { parseSingleFileUpload } from './singlefile.js';
-import { buildTelegraphNodes, createPage } from './telegraph.js';
+import { buildTelegraphNodes, createPage, editPage, TelegraphPageNotFoundError } from './telegraph.js';
+import { getClipRecord, putClipRecord } from './idempotency.js';
 import { fetchArticleFromUrl, extractTitle, cleanJinaBody, stripEmptyLinks } from './jina.js';
 import { extractArticleViaChain } from './extractor-chain.js';
 import { writeToFns, fetchFnsFileContent, saveFileToFns } from './fns.js';
@@ -250,10 +251,25 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 	const telegraphEnabled = Boolean(
 		env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID)
 	);
+	// 幂等：读 KV 里该 URL 的剪藏记录（url → {fnsPath, telegraphPath, telegraphUrl}）。
+	// 有 telegraphPath 则本轮走 editPage 更新原页，而不是 createPage 造重复页。
+	// CLIP_KV 未绑定或记录不存在时返回 null，行为与旧版完全一致。
+	const existingClipRecord = await getClipRecord(url, env);
+
 	const [fnsResult, telegraphResult] = await Promise.allSettled([
 		writeToFns({ path, content, env, url, summary, tags, clipMethod, clippedAt: now }),
 		telegraphEnabled
-			? pushTelegraphAndTelegram({ requestUrl, articleUrl: url, title, cleanBody: markdownBody, sourceHtml, summary, tags, env })
+			? pushTelegraphAndTelegram({
+					requestUrl,
+					articleUrl: url,
+					title,
+					cleanBody: markdownBody,
+					sourceHtml,
+					summary,
+					tags,
+					env,
+					existingRecord: existingClipRecord,
+				})
 			: Promise.resolve(null),
 	]);
 
@@ -287,6 +303,24 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 
 	const fnsData = fnsOk ? fnsResult.value : null;
 	console.log('Clipped:', title, '->', fnsData?.path || path, fnsData?.mode || 'created');
+
+	// 双写幂等记录：任一侧成功即落 KV（partial 记录），下次重试同 URL 就能补齐/更新另一侧。
+	// writeToFns 的记录侧已自带按 URL 查重；这里主要供 Telegraph 的 editPage 路径使用。
+	if (fnsOk || (telegraphEnabled && telegraphOk)) {
+		await putClipRecord(
+			url,
+			{
+				url,
+				title,
+				fnsPath: fnsOk ? fnsData?.path || path : existingClipRecord?.fnsPath || '',
+				telegraphPath: telegraphData.telegraphPath || existingClipRecord?.telegraphPath || '',
+				telegraphUrl: telegraphData.telegraphUrl || existingClipRecord?.telegraphUrl || '',
+				updatedAt: now.toISOString(),
+			},
+			env
+		);
+	}
+
 	return Response.json(
 		{
 			ok: true,
@@ -296,6 +330,8 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 			path: fnsOk ? fnsData.path : undefined,
 			telegraphOk,
 			telegraphUrl: telegraphData.telegraphUrl || undefined,
+			telegraphPath: telegraphData.telegraphPath || undefined,
+			telegraphMode: telegraphData.telegraphMode || undefined,
 			telegramMessageId: telegraphData.telegramMessageId || undefined,
 			...extraResponseFields,
 		},
@@ -303,7 +339,7 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 	);
 }
 
-async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, sourceHtml, summary, tags, env }) {
+async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, sourceHtml, summary, tags, env, existingRecord = null }) {
 	const uploadedHtml = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, articleUrl) : '';
 	const fetchedHtml = uploadedHtml ? '' : await fetchSourceHtml(articleUrl);
 	const telegraphHtmlSource = uploadedHtml || (fetchedHtml ? prepareSourceHtmlForTelegraph(fetchedHtml, articleUrl) : '');
@@ -347,7 +383,22 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 		sourceUrl: articleUrl,
 	});
 
-	const pageResult = await createPage(title, nodes, env);
+	// 幂等：KV 记录里有该 URL 的 Telegraph 页 → 编辑原页；仅当页面已消失（被手动删/记录过期，
+	// API 返回 PAGE_NOT_FOUND）才回退新建，避免一次网络误判造成重复页。
+	let pageResult = null;
+	let telegraphMode = 'created';
+	if (existingRecord?.telegraphPath) {
+		try {
+			pageResult = await editPage(existingRecord.telegraphPath, title, nodes, env);
+			telegraphMode = 'updated';
+		} catch (e) {
+			if (!(e instanceof TelegraphPageNotFoundError)) throw e;
+			console.warn('Telegraph page missing, fallback to createPage:', existingRecord.telegraphPath);
+		}
+	}
+	if (!pageResult) {
+		pageResult = await createPage(title, nodes, env);
+	}
 	const telegraphUrl = pageResult.url;
 
 	const hostname = escapeHtml(getHostname(articleUrl));
@@ -355,14 +406,15 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 	const summaryBlock = summary ? `\n\n${escapeHtml(summary)}` : '';
 	const tagLine = formatTagLine(tags);
 	const tagBlock = tagLine ? `\n\n${escapeHtml(tagLine)}` : '';
+	const updateBlock = telegraphMode === 'updated' ? '\n\n🔄 内容已更新' : '';
 	const msgText = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(
 		title
-	)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}\n\n#webclipper`;
+	)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}${updateBlock}\n\n#webclipper`;
 	const msgResult = await sendMessage(msgText, env.USER_ID || env.TELEGRAM_CHAT_ID, env, { linkPreviewUrl: telegraphUrl });
 	const telegramMessageId = msgResult.message_id;
 
-	console.log('Telegraph/Telegram pushed:', telegraphUrl, telegramMessageId);
-	return { telegraphUrl, telegramMessageId };
+	console.log('Telegraph/Telegram pushed:', telegraphUrl, telegraphMode, telegramMessageId);
+	return { telegraphUrl, telegramMessageId, telegraphMode, telegraphPath: pageResult.path };
 }
 
 async function externalizeInlineImages({ requestUrl, sourceHtml, env }) {
