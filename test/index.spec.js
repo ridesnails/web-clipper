@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker, { isValidUrl, extractTitle, makeSlug, cleanJinaBody, buildNote, stripEmptyLinks } from '../src';
+import { fetchArticleFromUrl, parseFrontmatter } from '../src/jina.js';
 
 const mockEnv = {
 	API_KEY: 'test-api-key',
@@ -518,7 +519,7 @@ describe('Telegraph + Telegram integration', () => {
 
 		installFetchRouter([
 			{
-				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
 				response: new Response(jinaMarkdown, { status: 200 }),
 			},
 			{
@@ -619,7 +620,7 @@ Body.`;
 
 		installFetchRouter([
 			{
-				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
 				response: new Response(markdownWithImage, { status: 200 }),
 			},
 			{
@@ -689,7 +690,7 @@ Body.`;
 	it('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
 		installFetchRouter([
 			{
-				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
 				response: new Response(jinaMarkdown, { status: 200 }),
 			},
 			{
@@ -730,7 +731,7 @@ Body.`;
 
 		installFetchRouter([
 			{
-				match: (url) => url === 'https://r.jina.ai/https://example.com/article',
+				match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
 				response: new Response(jinaMarkdown, { status: 200 }),
 			},
 			{
@@ -930,7 +931,9 @@ describe('Telegram webhook clip entry', () => {
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({ ok: true });
 		expect(fetchMock).toHaveBeenCalledTimes(3);
-		expect(fetchMock.mock.calls[0][0]).toBe('https://r.jina.ai/https://example.com/article');
+		expect(fetchMock.mock.calls[0][0]).toBe('https://r.jina.ai/');
+		expect(fetchMock.mock.calls[0][1].method).toBe('POST');
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ url: 'https://example.com/article' });
 		expect(fetchMock.mock.calls[1][0]).toContain(`${webhookEnv.FNS_BASE}/api/notes?`);
 		expect(fetchMock.mock.calls[2][0]).toBe(`${webhookEnv.FNS_BASE}/api/note`);
 	});
@@ -1156,5 +1159,91 @@ describe('SingleFile upload entry', () => {
 		expect(fnsPayload.content).toContain('Main article second paragraph with more content.');
 		expect(fnsPayload.content).toContain('![real-image](data:image/webp;base64,BBBB)');
 		expect(fnsPayload.content).not.toContain('Short reply');
+	});
+});
+
+// 10. Jina fetch unit tests (POST + frontmatter contract)
+describe('parseFrontmatter', () => {
+	it('parses frontmatter keys and strips them from body', () => {
+		const md = `---
+title: "FM Title"
+url: "https://example.com/article"
+publishedTime: "Sun, 30 Aug 2026 04:11:49 GMT"
+warning: "This is a cached snapshot"
+---
+
+# Heading
+
+Body text.`;
+		const { meta, body } = parseFrontmatter(md);
+		expect(meta).toEqual({
+			title: 'FM Title',
+			url: 'https://example.com/article',
+			publishedtime: 'Sun, 30 Aug 2026 04:11:49 GMT',
+			warning: 'This is a cached snapshot',
+		});
+		expect(body).toContain('# Heading');
+		expect(body).not.toContain('title:');
+	});
+
+	it('does not treat --- ruledown body as frontmatter (guard)', () => {
+		const md = '---\nplain text\n---\n\nBody';
+		const { meta, body } = parseFrontmatter(md);
+		expect(meta).toBeNull();
+		expect(body).toBe(md);
+	});
+});
+
+describe('fetchArticleFromUrl unit', () => {
+	it('POSTs JSON body to r.jina.ai root, keeps hash fragment, request headers', async () => {
+		fetchMock.mockResolvedValueOnce(new Response('---\ntitle: "T"\nurl: "https://example.com/article"\n---\n\nBody', { status: 200 }));
+		const article = await fetchArticleFromUrl('https://example.com/article#frag', mockEnv);
+		const [url, init] = fetchMock.mock.calls[0];
+		expect(url).toBe('https://r.jina.ai/');
+		expect(init.method).toBe('POST');
+		expect(JSON.parse(init.body)).toEqual({ url: 'https://example.com/article#frag' });
+		expect(init.headers['Content-Type']).toBe('application/json');
+		expect(init.headers['X-Engine']).toBe('browser');
+		expect(init.headers['X-Respond-With']).toBe('frontmatter');
+		expect(init.headers['X-Md-Bullet-List-Marker']).toBe('-');
+		expect(init.headers['X-No-Cache']).toBeUndefined();
+		expect(article.title).toBe('T');
+		expect(article.url).toBe('https://example.com/article');
+		expect(article.markdownBody).toBe('Body');
+	});
+
+	it('rejects invalid url before fetching', async () => {
+		await expect(fetchArticleFromUrl('notaurl', mockEnv)).rejects.toThrow(/invalid url/);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('forwards targetSelector/waitForSelector headers only when provided', async () => {
+		fetchMock.mockResolvedValueOnce(new Response('---\ntitle: "T"\nurl: "https://example.com/a"\n---\n\nB', { status: 200 }));
+		await fetchArticleFromUrl('https://example.com/a', mockEnv, { targetSelector: '#VPContent' });
+		expect(fetchMock.mock.calls[0][1].headers['X-Target-Selector']).toBe('#VPContent');
+		expect(fetchMock.mock.calls[0][1].headers['X-Wait-For-Selector']).toBeUndefined();
+
+		fetchMock.mockResolvedValueOnce(new Response('---\ntitle: "T"\nurl: "https://example.com/a"\n---\n\nB', { status: 200 }));
+		await fetchArticleFromUrl('https://example.com/a', mockEnv, {});
+		expect(fetchMock.mock.calls[1][1].headers['X-Target-Selector']).toBeUndefined();
+	});
+
+	it('retries a 500 with X-No-Cache on the second attempt', async () => {
+		fetchMock
+			.mockResolvedValueOnce(new Response('boom', { status: 500 }))
+			.mockResolvedValueOnce(new Response('---\ntitle: "R"\nurl: "https://example.com/a"\n---\n\nB', { status: 200 }));
+		const article = await fetchArticleFromUrl('https://example.com/a', mockEnv);
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0][1].headers['X-No-Cache']).toBeUndefined();
+		expect(fetchMock.mock.calls[1][1].headers['X-No-Cache']).toBe('true');
+		expect(article.title).toBe('R');
+	});
+
+	it('falls back to legacy Jina plain-text format (Title:/Markdown Content:)', async () => {
+		fetchMock.mockResolvedValueOnce(new Response(jinaMarkdown, { status: 200 }));
+		const article = await fetchArticleFromUrl('https://example.com/article', mockEnv);
+		expect(article.title).toBe('Test Article');
+		expect(article.markdownBody).toContain('This is the body content.');
+		expect(article.markdownBody).not.toContain('Title:');
 	});
 });

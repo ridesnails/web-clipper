@@ -106,7 +106,10 @@ async function handleJsonClipRequest(request, env) {
 	}
 
 	try {
-		const article = await fetchArticleFromUrl(url, env);
+		const article = await fetchArticleFromUrl(url, env, {
+			targetSelector: reqBody.targetSelector,
+			waitForSelector: reqBody.waitForSelector,
+		});
 		return await clipArticle({
 			requestUrl: request.url,
 			article,
