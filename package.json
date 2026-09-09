@@ -14,6 +14,7 @@
 	},
 	"dependencies": {
 		"@mozilla/readability": "^0.6.0",
+		"defuddle": "^0.19.3",
 		"linkedom": "^0.18.12",
 		"marked": "^18.0.4",
 		"turndown": "^7.2.4",

@@ -150,7 +150,7 @@ function normalizeTitle(value) {
 		.trim();
 }
 
-function htmlFragmentToMarkdown(articleHtml, options = {}) {
+export function htmlFragmentToMarkdown(articleHtml, options = {}) {
 	if (!articleHtml || !articleHtml.trim()) return '';
 	const normalizedHtml = normalizeCodeBlocksHtml(articleHtml);
 	const { document, window } = parseHTML(`<!doctype html><html><body>${normalizedHtml}</body></html>`);

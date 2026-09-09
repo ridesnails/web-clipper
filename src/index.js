@@ -2,6 +2,7 @@ import { sendPhoto, sendMessage, getFile } from './telegram.js';
 import { parseSingleFileUpload } from './singlefile.js';
 import { buildTelegraphNodes, createPage } from './telegraph.js';
 import { fetchArticleFromUrl, extractTitle, cleanJinaBody, stripEmptyLinks } from './jina.js';
+import { extractArticleViaChain } from './extractor-chain.js';
 import { writeToFns, fetchFnsFileContent, saveFileToFns } from './fns.js';
 import { makeSlug, buildNote } from './note.js';
 import { generateAiMetadata } from './ai.js';
@@ -106,7 +107,7 @@ async function handleJsonClipRequest(request, env) {
 	}
 
 	try {
-		const article = await fetchArticleFromUrl(url, env, {
+		const article = await extractArticleViaChain(url, env, {
 			targetSelector: reqBody.targetSelector,
 			waitForSelector: reqBody.waitForSelector,
 		});
