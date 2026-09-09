@@ -8,6 +8,40 @@ const SUPPORTED_TAGS = new Set(['a', 'aside', 'b', 'blockquote', 'br', 'code', '
 const VOID_TAGS = new Set(['br', 'hr', 'img', 'iframe', 'video']);
 const BLOCK_TAGS = new Set(['p', 'blockquote', 'pre', 'ul', 'ol', 'li', 'h3', 'h4', 'figure', 'figcaption', 'aside', 'hr']);
 
+// Telegraph createPage 对 content 有 64KB 上限，超限整个请求 data.ok=false。
+// 阶段一止血：发送前按节点粒度二分截断并附加尾注（多页拆分/编辑流留待后续阶段）。
+const TELEGRAPH_CONTENT_LIMIT = 64 * 1024;
+const UTF8_ENCODER = new TextEncoder();
+
+function utf8ByteLength(str) {
+	return UTF8_ENCODER.encode(str).length;
+}
+
+/**
+ * 二分找到能装进 limit 的最大前缀节点数，并附加截断尾注。
+ * @param {Array} nodes - Telegraph Node 数组
+ * @param {number} limit - 字节上限
+ * @returns {Array}
+ */
+function truncateTelegraphNodes(nodes, limit) {
+	const note = {
+		tag: 'p',
+		children: ['⚠️ 正文超出 Telegraph 64KB 上限已截断，完整内容请查看顶部原文链接。'],
+	};
+	let lo = 0;
+	let hi = nodes.length;
+	while (lo < hi) {
+		const mid = Math.ceil((lo + hi) / 2);
+		const candidate = nodes.slice(0, mid).concat([note]);
+		if (utf8ByteLength(JSON.stringify(candidate)) <= limit) {
+			lo = mid;
+		} else {
+			hi = mid - 1;
+		}
+	}
+	return nodes.slice(0, lo).concat([note]);
+}
+
 /**
  * 在 Telegraph 上创建页面
  * @param {string} title - 页面标题
@@ -16,6 +50,12 @@ const BLOCK_TAGS = new Set(['p', 'blockquote', 'pre', 'ul', 'ol', 'li', 'h3', 'h
  * @returns {Promise<{url: string, path: string, title: string}>}
  */
 export async function createPage(title, contentNodes, env) {
+	let nodes = Array.isArray(contentNodes) ? contentNodes.filter(Boolean) : [];
+	let serialized = JSON.stringify(nodes);
+	if (utf8ByteLength(serialized) > TELEGRAPH_CONTENT_LIMIT) {
+		nodes = truncateTelegraphNodes(nodes, TELEGRAPH_CONTENT_LIMIT);
+		serialized = JSON.stringify(nodes);
+	}
 	const res = await fetchWithTimeout(
 		'https://api.telegra.ph/createPage',
 		{
@@ -24,7 +64,7 @@ export async function createPage(title, contentNodes, env) {
 			body: JSON.stringify({
 				access_token: env.TELEGRAPH_ACCESS_TOKEN,
 				title,
-				content: JSON.stringify(contentNodes),
+				content: serialized,
 				return_content: false,
 			}),
 		},
@@ -172,6 +212,29 @@ function preprocessTables(markdown) {
 	return result.join('\n');
 }
 
+/**
+ * 把 <table> 降级为 <pre>（Telegraph 无表格标签）：每行 "cell | cell"。
+ * 与 Markdown 路 preprocessTables 的思路一致，保住行列结构。
+ * @param {Element} table
+ * @returns {{tag: string, children: string[]}|null}
+ */
+function tableToPreNode(table) {
+	const rows = Array.from(table.querySelectorAll('tr'));
+	const lines = [];
+	rows.forEach((row, index) => {
+		const cells = Array.from(row.querySelectorAll('th,td')).map((cell) =>
+			String(cell.textContent || '').replace(/\s+/g, ' ').trim()
+		);
+		if (!cells.length) return;
+		lines.push(cells.join(' | '));
+		if (index === 0 && row.querySelector('th')) {
+			lines.push(cells.map(() => '---').join(' | '));
+		}
+	});
+	if (!lines.length) return null;
+	return { tag: 'pre', children: [lines.join('\n')] };
+}
+
 function domToNode(element) {
 	if (!element) return null;
 	if (element.nodeType === 3) {
@@ -191,6 +254,11 @@ function domToNode(element) {
 
 	const rawTag = element.tagName.toLowerCase();
 	const tag = normalizeTag(rawTag);
+
+	// Telegraph 不支持 table：降级为 <pre>，避免默认处理把整个表格压成无结构文本
+	if (rawTag === 'table') {
+		return tableToPreNode(element);
+	}
 
 	if (!SUPPORTED_TAGS.has(tag)) {
 		const children = [];

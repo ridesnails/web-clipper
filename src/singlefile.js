@@ -1,9 +1,12 @@
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 import TurndownService from './vendor/turndown.cjs.js';
+import { gfm } from 'turndown-plugin-gfm';
 import { fenceCodeBlock, extractCodeLanguage, normalizeCodeBlocksHtml } from './code-blocks.js';
 
-const MAX_HTML_SIZE = 10 * 1024 * 1024;
+// Workers 每 isolate 128MB：file.text() + linkedom 建树会膨胀 3-5x，
+// 10MB HTML 并发两篇就可能 exceededMemory，压到 3.5MB。
+const MAX_HTML_SIZE = 3.5 * 1024 * 1024;
 
 export async function parseSingleFileUpload(request) {
 	const form = await request.formData();
@@ -206,6 +209,10 @@ function createTurndownService(options) {
 		strongDelimiter: '**',
 		br: '\n',
 	});
+
+	// GFM 规则集（表格→pipe、删除线、任务列表、高亮代码块）。
+	// 表格转成 pipe markdown 后，telegraph 侧 preprocessTables 统一降级处理。
+	service.use(gfm);
 
 	service.addRule('preserve-pre-code', {
 		filter(node) {

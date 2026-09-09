@@ -71,7 +71,14 @@ function removeLineNumberArtifacts(root) {
 function collapseTableCodeBlocks(root) {
 	for (const table of Array.from(root.querySelectorAll('table'))) {
 		const pres = Array.from(table.querySelectorAll('pre'));
-		if (pres.length < 2) continue;
+		// 行号 td 被清掉后高亮表格常只剩 1 个 pre（旧逻辑要求 ≥2 会放行，
+		// 表格随后被 telegraph/singlefile 的表格降级抢走变 pipe 文本）。
+		// 靠类名/语言标记识别高亮表格，避免误折叠真实数据表格里偶发的单个 pre。
+		const looksLikeCodeTable =
+			pres.length >= 2 ||
+			/(rouge|highlight|code|syntax|source-code)/i.test(collectClassNames(table)) ||
+			pres.some((pre) => pre.querySelector('code[class*="language-"]'));
+		if (!looksLikeCodeTable) continue;
 		const best = chooseBestPre(pres);
 		if (!best) continue;
 		table.replaceWith(buildPreNode(table.ownerDocument, best.textContent || '', extractCodeLanguage(best)));

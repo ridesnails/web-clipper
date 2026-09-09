@@ -27,6 +27,11 @@ export async function withRetry(fn, options = {}) {
 	const shouldRetry =
 		options.shouldRetry ??
 		((error) => {
+			// 数值状态优先：message 正则 /5\d\d/ 会误匹配错误正文里的任意三位数
+			// （如 HTTP 404 响应体里含 "error 502 upstream"）。
+			if (error && typeof error.status === 'number') {
+				return error.status === 429 || (error.status >= 500 && error.status <= 599);
+			}
 			const msg = String(error?.message || error || '');
 			return /timeout|network|fetch failed|429|5\d\d/i.test(msg);
 		});
