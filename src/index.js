@@ -4,12 +4,16 @@ import { isPrivateHostname, isSsrfSafeUrl } from './ssrf.js';
 import { parseSingleFileUpload } from './singlefile.js';
 import { buildTelegraphNodes, createPage, editPage, TelegraphPageNotFoundError } from './telegraph.js';
 import { getClipRecord, putClipRecord } from './idempotency.js';
+import { acquireClipLock, waitForConcurrentClip, releaseClipLock } from './clip-lock.js';
 import { fetchArticleFromUrl, extractTitle, cleanJinaBody, stripEmptyLinks } from './jina.js';
 import { extractArticleViaChain } from './extractor-chain.js';
 import { writeToFns, fetchFnsFileContent, saveFileToFns } from './fns.js';
 import { makeSlug, buildNote } from './note.js';
 import { generateAiMetadata } from './ai.js';
 import { isValidUrl, escapeHtml, escapeHtmlAttr, getHostname, resolveUrl, formatTagLine } from './utils.js';
+
+// Durable Object classes must be exported from the worker entry to receive bindings.
+export { ClipLock } from './clip-lock.js';
 
 const MAX_SINGLEFILE_INLINE_IMAGES = 6;
 const INLINE_IMAGE_UPLOAD_CONCURRENCY = 3;
@@ -268,10 +272,21 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 	const telegraphEnabled = Boolean(
 		env.TELEGRAPH_ACCESS_TOKEN && (env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN) && (env.USER_ID || env.TELEGRAM_CHAT_ID)
 	);
+	// DO 互斥锁（阶段四B）：并发两次剪同 URL 时，后到者未获锁 → 轮询 KV 等持锁者落记录
+	// （=对方已完成双写），随后仍走下方"已有记录"路径更新，消除 KV 最终一致窗口里的
+	// 双 createPage 竞态。无 CLIP_LOCK 绑定 / DO 异常 → 静默降级为无锁（与旧版一致）；
+	// 等待超时 → 降级直接剪藏（宁重复勿阻塞）；持锁方崩溃由 90s TTL 兜底。
+	const clipLock = await acquireClipLock(url, env);
 	// 幂等：读 KV 里该 URL 的剪藏记录（url → {fnsPath, telegraphPath, telegraphUrl}）。
 	// 有 telegraphPath 则本轮走 editPage 更新原页，而不是 createPage 造重复页。
 	// CLIP_KV 未绑定或记录不存在时返回 null，行为与旧版完全一致。
-	const existingClipRecord = await getClipRecord(url, env);
+	// 等待侧拿到的记录同源（都是 KV），后续分支自动复用。
+	let existingClipRecord;
+	if (!clipLock || clipLock.granted) {
+		existingClipRecord = await getClipRecord(url, env);
+	} else {
+		existingClipRecord = await waitForConcurrentClip(url, env);
+	}
 
 	const [fnsResult, telegraphResult] = await Promise.allSettled([
 		writeToFns({ path, content, env, url, summary, tags, clipMethod, clippedAt: now }),
@@ -295,6 +310,7 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 	const telegraphData = telegraphEnabled && telegraphResult.status === 'fulfilled' ? telegraphResult.value : {};
 
 	if (!fnsOk && (!telegraphEnabled || !telegraphOk)) {
+		await releaseClipLock(clipLock, env);
 		const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
 		if (!telegraphEnabled) {
 			return Response.json({ error: `FNS failed: ${fnsError}` }, { status: 502, headers: corsHeaders(env) });
@@ -338,6 +354,7 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 		);
 	}
 
+	await releaseClipLock(clipLock, env);
 	return Response.json(
 		{
 			ok: true,

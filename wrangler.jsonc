@@ -51,6 +51,26 @@
 		}
 	],
 	/**
+	 * Durable Object for concurrent same-URL clip mutual exclusion (phase 4B).
+	 * SQLite-backed (:new_sqlite_classes) — works on Free plan.
+	 */
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CLIP_LOCK",
+				"class_name": "ClipLock"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"ClipLock"
+			]
+		}
+	]
+	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
 	 */
