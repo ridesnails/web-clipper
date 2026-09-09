@@ -34,6 +34,12 @@
 	"vars": {
 		"DEFUDDLE_FALLBACK": "true"
 	},
+	"ai": {
+		"binding": "AI"
+	},
+	"browser": {
+		"binding": "BROWSER"
+	},
 	/**
 	 * Static Assets
 	 * https://developers.cloudflare.com/workers/static-assets/binding/
