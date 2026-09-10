@@ -23,6 +23,15 @@ registerClipHandler(performJsonClip);
 
 const MAX_SINGLEFILE_INLINE_IMAGES = 6;
 const INLINE_IMAGE_UPLOAD_CONCURRENCY = 3;
+// Telegraph 图片代理上限（方案A）：每张图消耗 2 个 subrequest（fetch 图片 + sendPhoto 上传），
+// CF Workers 单 invocation 上限 50（Free plan）→ 20 张 ≈ 40 预算，给 Jina/FNS/Telegraph 留余量。
+// 超限图片不再代理（保留原 URL，公开图床可直出），可用 env.IMAGE_PROXY_LIMIT 覆盖。
+const IMAGE_PROXY_LIMIT_DEFAULT = 20;
+
+function readIntEnv(env, name, fallback) {
+	const parsed = Number.parseInt(env?.[name], 10);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function corsHeaders(env) {
 	return {
@@ -499,9 +508,17 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 			? extractHtmlImageUrls(uploadedHtml || fetchedHtml, articleUrl)
 			: extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
 
+	// 方案A：subrequest 预算护栏。每图 2 subrequest（fetch+sendPhoto），超限图不代理
+	// （保留原 URL），仅计一条 imageProxyLimit 警告，正文 HTML 照常构建。
+	const imageProxyLimit = readIntEnv(env, 'IMAGE_PROXY_LIMIT', IMAGE_PROXY_LIMIT_DEFAULT);
+	const skippedImageCount = Math.max(0, imageItems.length - imageProxyLimit);
+	if (skippedImageCount > 0) {
+		console.warn('Image proxy limit reached:', imageItems.length, 'images found, proxying first', imageProxyLimit, '- skipped:', skippedImageCount, '(reason: imageProxyLimit)');
+	}
+
 	// Telegraph 路的图片上传与 inline 路共用并发上限（3）：串行循环在多图
 	// 文章上会把整段剪藏拖到分钟级；runWithConcurrency 按下标保序返回。
-	const imageTasks = imageItems.map((imageItem) => async () => {
+	const imageTasks = imageItems.slice(0, imageProxyLimit).map((imageItem) => async () => {
 		const imgUrl = imageItem.absolute;
 		if (!isSsrfSafeUrl(imgUrl)) {
 			console.warn('SSRF guard blocked article image fetch:', imgUrl);

@@ -799,6 +799,92 @@ Body.`;
 		expect(serializedNodes).not.toContain('127.0.0.1:8787/image-proxy');
 	});
 
+	it('POST / respects IMAGE_PROXY_LIMIT - proxies first N images, keeps rest as original URLs (方案A subrequest guard)', async () => {
+		const markdownWithImage = `Title: Test Article
+URL Source: https://example.com/article
+Published Time: 2024-01-01
+Markdown Content:
+
+# Test Article
+
+Body.`;
+		const sourceHtml = '<article><h1>HTML Article</h1><img src="/img-1.jpg"><img src="/img-2.jpg"><img src="/img-3.jpg"><p>Body.</p></article>';
+		const limitedEnv = { ...telegraphEnv, IMAGE_PROXY_LIMIT: '2' };
+
+		installFetchRouter([
+			{
+				match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
+				response: new Response(markdownWithImage, { status: 200 }),
+			},
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsCreateResponse(),
+			},
+			{
+				match: (url) => url === 'https://example.com/article',
+				response: new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }),
+			},
+			{
+				match: (url) => url.startsWith('https://example.com/img-'),
+				// 函数式：Response body 一次性，多图 fetch 各需新实例
+				response: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } }),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`,
+				response: () => jsonResponse({
+					ok: true,
+					result: {
+						message_id: 77,
+						photo: [{ file_id: 'photo-file-1', file_unique_id: 'uniq-1', width: 800 }],
+					},
+				}),
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`,
+				response: jsonResponse({ ok: true, result: { message_id: 100 } }),
+			},
+		]);
+
+		const request = new Request('http://127.0.0.1:8787', {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${mockEnv.API_KEY}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ url: 'https://example.com/article' }),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, limitedEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.fnsOk).toBe(true);
+		expect(json.telegraphOk).toBe(true);
+
+		// 只有前 2 张被 fetch+sendPhoto，第 3 张不产生任何 subrequest
+		const sendPhotoCalls = fetchMock.mock.calls.filter((call) => call[0] === `https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`);
+		expect(sendPhotoCalls.length).toBe(2);
+
+		const telegraphCall = fetchMock.mock.calls.find((call) => call[0] === 'https://api.telegra.ph/createPage');
+		const telegraphNodes = JSON.parse(JSON.parse(telegraphCall[1].body).content);
+		const serializedNodes = JSON.stringify(telegraphNodes);
+		// 前 2 张替换为代理 URL
+		expect(serializedNodes).toContain(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1&sig=`);
+		expect(serializedNodes).not.toContain('https://example.com/img-1.jpg');
+		expect(serializedNodes).not.toContain('https://example.com/img-2.jpg');
+		// 超限第 3 张保留原 URL，正文照常返回
+		expect(serializedNodes).toContain('https://example.com/img-3.jpg');
+	});
+
 	it('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
 		installFetchRouter([
 			{
