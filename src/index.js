@@ -21,8 +21,11 @@ export { ClipWorkflow } from './clip-workflow.js';
 // 阶段四C：把剪藏主体注册给异步 Workflow（函数声明已提升，顶层注册安全）。
 registerClipHandler(performJsonClip);
 
-const MAX_SINGLEFILE_INLINE_IMAGES = 6;
-const INLINE_IMAGE_UPLOAD_CONCURRENCY = 3;
+// 图片上限配置：从环境变量读取，默认 6 张（兼容原有行为）
+// 可通过 IMG_MAX_IMAGES 调整，无需改代码重新部署
+const MAX_SINGLEFILE_INLINE_IMAGES = Number(env.IMG_MAX_IMAGES || 6);
+// 图片上传并发配置：从环境变量读取，默认 3  concurrent
+const INLINE_IMAGE_UPLOAD_CONCURRENCY = Number(env.IMG_UPLOAD_CONCURRENCY || 3);
 
 function corsHeaders(env) {
 	return {
@@ -30,6 +33,23 @@ function corsHeaders(env) {
 		'Access-Control-Allow-Methods': 'POST, OPTIONS',
 		'Access-Control-Allow-Headers': 'Authorization, Content-Type',
 	};
+}
+
+/** 统一错误响应格式
+ * @param {string} message - 错误描述
+ * @param {string} [code] - rejection_code，客户端可据此决定重试策略
+ * @param {number} [status=400] - HTTP 状态码
+ * @returns {Response}
+ */
+function jsonError(message, code, status = 400) {
+	const body = { error: message };
+	if (code) {
+		body.rejection_code = code;
+	}
+	return new Response(JSON.stringify(body), {
+		status,
+		headers: corsHeaders(env),
+	});
 }
 
 const worker = {
@@ -65,16 +85,16 @@ const worker = {
 		}
 
 		if (request.method !== 'POST') {
-			return Response.json({ error: 'Method not allowed. Use POST.' }, { status: 405, headers: corsHeaders(env) });
+			return jsonError("Method not allowed. Use POST.", "method-not-allowed", 405);
 		}
 
 		const auth = request.headers.get('Authorization') || '';
 		if (!env.API_KEY) {
 			// Fail closed: an unset API_KEY would otherwise accept "Bearer undefined".
-			return Response.json({ error: 'Server auth not configured (set API_KEY)' }, { status: 500, headers: corsHeaders(env) });
+			return jsonError("Server auth not configured (set API_KEY)", "auth-not-configured", 500);
 		}
 		if (!timingSafeEqualStrings(auth, `Bearer ${env.API_KEY}`)) {
-			return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(env) });
+			return jsonError("Unauthorized", "unauthorized", 401);
 		}
 
 		if (pathname === '/upload-html') {
@@ -127,7 +147,7 @@ async function handleJsonClipRequest(request, env) {
 	try {
 		reqBody = await request.json();
 	} catch {
-		return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Invalid JSON body", "invalid-json-body", 400);
 	}
 	return performJsonClip(reqBody, request.url, env, request.headers.get('X-Clip-Method'));
 }
@@ -138,10 +158,10 @@ async function handleJsonClipRequest(request, env) {
 async function performJsonClip(reqBody, requestUrl, env, clipMethodHeader) {
 	const url = reqBody.url;
 	if (!url || typeof url !== 'string') {
-		return Response.json({ error: "Missing 'url' field" }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Missing url field", "missing-url-field", 400);
 	}
 	if (!isValidUrl(url)) {
-		return Response.json({ error: 'Invalid url (must be http or https)' }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Invalid url (must be http or https)", "invalid-url", 400);
 	}
 
 	try {
@@ -157,7 +177,7 @@ async function performJsonClip(reqBody, requestUrl, env, clipMethodHeader) {
 		});
 	} catch (e) {
 		console.error('Jina fetch failed:', url, e.message);
-		return Response.json({ error: `Source fetch failed: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
+		return jsonError("Source fetch failed", "jina-fetch-failed", 502);
 	}
 }
 
@@ -166,19 +186,21 @@ async function performJsonClip(reqBody, requestUrl, env, clipMethodHeader) {
 async function handleAsyncClipRequest(request, env) {
 	const workflow = env.CLIP_WORKFLOW;
 	if (!workflow || typeof workflow.create !== 'function') {
-		return Response.json({ error: 'Async clip not available (CLIP_WORKFLOW binding missing)' }, { status: 501, headers: corsHeaders(env) });
+		return jsonError("Async clip not available (CLIP_WORKFLOW binding missing)", "async-not-available", 501);
+
 	}
 
 	let reqBody;
 	try {
 		reqBody = await request.json();
 	} catch {
-		return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Invalid JSON body", "invalid-json-body", 400);
 	}
 
 	const url = reqBody.url;
 	if (!url || typeof url !== 'string' || !isValidUrl(url)) {
-		return Response.json({ error: 'Missing or invalid url field' }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Missing or invalid url field", "missing-invalid-url", 400);
+
 	}
 
 	const instance = await workflow.create({
@@ -203,21 +225,22 @@ async function handleClipStatusRequest(request, env) {
 	const requestUrl = new URL(request.url);
 	const id = requestUrl.searchParams.get('id');
 	if (!id) {
-		return Response.json({ error: "Missing 'id' param" }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Missing id param", "missing-id-param", 400);
 	}
 
 	const auth = request.headers.get('Authorization') || '';
 	if (!env.API_KEY) {
 		// Fail closed: an unset API_KEY would otherwise accept "Bearer undefined".
-		return Response.json({ error: 'Server auth not configured (set API_KEY)' }, { status: 500, headers: corsHeaders(env) });
+		return jsonError("Server auth not configured (set API_KEY)", "auth-not-configured", 500);
 	}
 	if (!timingSafeEqualStrings(auth, `Bearer ${env.API_KEY}`)) {
-		return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(env) });
+		return jsonError("Unauthorized", "unauthorized", 401);
 	}
 
 	const workflow = env.CLIP_WORKFLOW;
 	if (!workflow || typeof workflow.get !== 'function') {
-		return Response.json({ error: 'Async clip not available (CLIP_WORKFLOW binding missing)' }, { status: 501, headers: corsHeaders(env) });
+		return jsonError("Async clip not available (CLIP_WORKFLOW binding missing)", "async-not-available", 501);
+
 	}
 
 	try {
@@ -246,7 +269,8 @@ async function handleClipStatusRequest(request, env) {
 		return Response.json(out, { headers: corsHeaders(env) });
 	} catch (e) {
 		// 本地/远端对不存在的 id 都会炸（instance.not_found）。
-		return Response.json({ error: e.message || 'instance not found' }, { status: 404, headers: corsHeaders(env) });
+		return jsonError("instance not found", "instance-not-found", 404);
+
 	}
 }
 
@@ -255,7 +279,7 @@ async function handleSingleFileClipRequest(request, env) {
 		const article = await parseSingleFileUpload(request);
 		return await clipArticle({ requestUrl: request.url, article, env, clipMethod: 'singlefile' });
 	} catch (e) {
-		return Response.json({ error: e.message }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Invalid request body", "invalid-request-body", 400);
 	}
 }
 
@@ -264,13 +288,13 @@ async function handleSaveMdRequest(request, env) {
 	try {
 		body = await request.json();
 	} catch {
-		return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
+		return jsonError("Invalid JSON body", "invalid-json-body", 400);
 	}
 
 	const title = String(body.title || '').trim();
 	const content = String(body.content || '').trim();
-	if (!title) return Response.json({ error: "Missing 'title' field" }, { status: 400, headers: corsHeaders(env) });
-	if (!content) return Response.json({ error: "Missing 'content' field" }, { status: 400, headers: corsHeaders(env) });
+	if (!title) return jsonError("Missing title field", "missing-title-field", 400);
+	if (!content) return jsonError("Missing content field", "missing-content-field", 400);
 
 	const conversationId = String(body.conversation_id || '').trim();
 	const extraTags = Array.isArray(body.tags) ? body.tags.map(String).filter(Boolean) : [];
@@ -425,7 +449,7 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 		await releaseClipLock(clipLock, env);
 		const fnsError = fnsResult.reason instanceof Error ? fnsResult.reason.message : String(fnsResult.reason || 'unknown error');
 		if (!telegraphEnabled) {
-			return Response.json({ error: `FNS failed: ${fnsError}` }, { status: 502, headers: corsHeaders(env) });
+			return jsonError("FNS failed", "fns-failed", 502);
 		}
 		const telegraphError =
 			telegraphResult.reason instanceof Error ? telegraphResult.reason.message : String(telegraphResult.reason || 'unknown error');
@@ -511,7 +535,7 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 			const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
 			if (!imgRes.ok) return null;
 			const buffer = new Uint8Array(await imgRes.arrayBuffer());
-			const uploadResult = await sendPhoto(buffer, 'image.jpg', env);
+			const uploadResult = await sendPhotoWithRetry(buffer, 'image.jpg', env);
 			return { raw: imageItem.raw, absolute: imgUrl, file_id: uploadResult.file_id };
 		} catch (e) {
 			console.error('Image upload failed:', imageItem.absolute, e.message);
@@ -596,7 +620,7 @@ async function externalizeInlineImages({ requestUrl, sourceHtml, env }) {
 
 	const tasks = candidates.map((dataUrl) => async () => {
 		try {
-			const uploadResult = await sendPhoto(dataUrlToBytes(dataUrl), 'singlefile-image', env);
+			const uploadResult = await sendPhotoWithRetry(dataUrlToBytes(dataUrl), 'singlefile-image', env);
 			const proxySig = await signParam(uploadResult.file_id, env);
 			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(uploadResult.file_id)}&sig=${proxySig}`;
 			return { original: dataUrl, replacement: proxyUrl };
@@ -643,7 +667,7 @@ async function handleHealthRequest(request, env) {
 	return Response.json({
 		ok: true,
 		capabilities: {
-			fns: Boolean(env.FNS_API_KEY),
+			fns: Boolean(env.FNS_BASE && env.FNS_VAULT && env.FNS_TOKEN),
 			telegraph: Boolean(env.TELEGRAPH_ACCESS_TOKEN),
 			telegramImg: Boolean(env.IMG_BOT || env.TELEGRAM_BOT_TOKEN),
 			telegramClip: Boolean(env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN),
