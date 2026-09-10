@@ -182,14 +182,14 @@ async function handleAsyncClipRequest(request, env) {
 	}
 
 	const instance = await workflow.create({
-		params: [
-			{
-				requestBody: reqBody,
-				requestUrl: request.url,
-				// Workflow 里没有 headers；X-Clip-Method 的异步等价物放 body 里。
-				clipMethodHeader: reqBody.clipMethod || '',
-			},
-		],
+		// 2026-09-10 prod 取证：params 传对象（官方契约），run() 侧 event.payload 即此对象。
+		// 旧版误传 [{}] 数组 → payload.requestBody undefined → step 'undefined.url' 反复重试。
+		params: {
+			requestBody: reqBody,
+			requestUrl: request.url,
+			// Workflow 里没有 headers；X-Clip-Method 的异步等价物放 body 里。
+			clipMethodHeader: reqBody.clipMethod || '',
+		},
 	});
 
 	return Response.json(
@@ -221,17 +221,16 @@ async function handleClipStatusRequest(request, env) {
 	}
 
 	try {
-		const instance = workflow.get(id);
+		// 2026-09-10 prod 取证：binding 的 get() 返回 Promise，必须 await——
+		// 漏 await 时 instance 是没有 status() 的 Promise，会误走下面的守卫并给出错误文案。
+		const instance = await workflow.get(id);
 		if (!instance || typeof instance.status !== 'function') {
-			// 本地 `wrangler dev` 的 workflow 模拟不含 instance.status()（2026-09 实证，
-			// 见 src/clip-workflow.js 头部）：给一个明确的 errored 终态，
-			// 而不是让 TypeError 伪装成误导性的 404 "instance not found"。
-			// 真实 Workers runtime 的 instance 恒有 status()，此分支只会在本地出现。
+			// 真实 Workers runtime 的 instance 恒有 status()；此守卫兜住异常 binding。
 			return Response.json(
 				{
 					workflowId: id,
 					status: 'errored',
-					error: 'local dev: workflow status API unavailable (local emulation has no instance.status; run() cannot execute locally)',
+					error: 'workflow status() unavailable on this instance/runtime (unexpected)',
 				},
 				{ headers: corsHeaders(env) },
 			);

@@ -43,10 +43,11 @@ function makeWorkflowBinding() {
 		instances,
 		async create({ params }) {
 			const id = `wf-${instances.size + 1}`;
-			instances.set(id, { params: params[0] });
+			instances.set(id, { params });
 			return { id };
 		},
-		get(id) {
+		// 真 binding 的 get() 返回 Promise——mock 也 async 化，防上游漏 await 的回归。
+		async get(id) {
 			const inst = instances.get(id);
 			if (!inst) throw new Error(`instance ${id} not found`);
 			return {
@@ -122,10 +123,17 @@ describe('ClipWorkflow engine contract', () => {
 		expect(result.body.error).toBe('bad request');
 	});
 
-	it('falls back to event.params[0] when event.payload is absent', async () => {
+	it('treats event.params object as payload when event.payload is absent (official shape)', async () => {
 		registerClipHandler(async (requestBody) => Response.json({ got: requestBody.url }));
 		const wf = new ClipWorkflow({}, mockEnv);
-		const result = await wf.run({ params: [{ requestBody: { url: 'https://b.example/y' } }] }, makeFakeStep());
+		const result = await wf.run({ params: { requestBody: { url: 'https://b.example/y' } } }, makeFakeStep());
+		expect(result.body.got).toBe('https://b.example/y');
+	});
+
+	it('compat: legacy array-shaped payload still resolves to the first element', async () => {
+		registerClipHandler(async (requestBody) => Response.json({ got: requestBody.url }));
+		const wf = new ClipWorkflow({}, mockEnv);
+		const result = await wf.run({ payload: [{ requestBody: { url: 'https://b.example/y' } }] }, makeFakeStep());
 		expect(result.body.got).toBe('https://b.example/y');
 	});
 

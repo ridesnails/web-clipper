@@ -37,8 +37,12 @@ export class ClipWorkflow extends WorkflowEntrypoint {
 				if (!clipHandler) {
 					throw new Error('clip handler not registered (worker entry must call registerClipHandler)');
 				}
-				// 官方 event.payload = create() 传入 params[0]；对 params 数组形态留一个兜底。
-				const payload = event.payload ?? event.params?.[0] ?? {};
+				// 官方契约：create({ params: 对象 }) 的对象即 event.payload（不拆数组）。
+				// 2026-09-10 prod 取证修正——旧版误信 params[0] 并真传数组导致 undefined.url。
+				// 兼容层：payload 缺失退回 event.params；历史数组形态取 [0]。
+				const raw = event.payload ?? event.params ?? {};
+				const unwrapped = Array.isArray(raw) ? raw[0] : raw;
+				const payload = unwrapped && typeof unwrapped === 'object' ? unwrapped : {};
 				const response = await clipHandler(
 					payload.requestBody,
 					payload.requestUrl,
