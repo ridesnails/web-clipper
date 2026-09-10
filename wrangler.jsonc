@@ -69,6 +69,18 @@
 				"ClipLock"
 			]
 		}
+	],
+	/**
+	 * Workflow for async clip jobs (phase 4C): client POSTs /json-async, engine
+	 * runs the full clip chain server-side (survives client disconnects), client
+	 * polls /clip-status. Deploy requires the account to support Workflows.
+	 */
+	"workflows": [
+		{
+			"name": "web-clipper-clip",
+			"binding": "CLIP_WORKFLOW",
+			"class_name": "ClipWorkflow"
+		}
 	]
 	/**
 	 * Static Assets

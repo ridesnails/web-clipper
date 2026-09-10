@@ -11,9 +11,15 @@ import { writeToFns, fetchFnsFileContent, saveFileToFns } from './fns.js';
 import { makeSlug, buildNote } from './note.js';
 import { generateAiMetadata } from './ai.js';
 import { isValidUrl, escapeHtml, escapeHtmlAttr, getHostname, resolveUrl, formatTagLine, chinaYearMonth } from './utils.js';
+import { registerClipHandler } from './clip-workflow.js';
 
 // Durable Object classes must be exported from the worker entry to receive bindings.
 export { ClipLock } from './clip-lock.js';
+// Workflow classes must be exported from the worker entry to receive bindings (wrangler 会在启动时校验).
+export { ClipWorkflow } from './clip-workflow.js';
+
+// 阶段四C：把剪藏主体注册给异步 Workflow（函数声明已提升，顶层注册安全）。
+registerClipHandler(performJsonClip);
 
 const MAX_SINGLEFILE_INLINE_IMAGES = 6;
 const INLINE_IMAGE_UPLOAD_CONCURRENCY = 3;
@@ -50,6 +56,10 @@ const worker = {
 			return handleHealthRequest(request, env);
 		}
 
+		if (pathname === '/clip-status' && request.method === 'GET') {
+			return handleClipStatusRequest(request, env);
+		}
+
 		if (request.method === 'OPTIONS') {
 			return new Response(null, { status: 204, headers: corsHeaders(env) });
 		}
@@ -72,6 +82,9 @@ const worker = {
 		}
 		if (pathname === '/save-md') {
 			return handleSaveMdRequest(request, env);
+		}
+		if (pathname === '/json-async') {
+			return handleAsyncClipRequest(request, env);
 		}
 		return handleJsonClipRequest(request, env);
 	},
@@ -116,7 +129,13 @@ async function handleJsonClipRequest(request, env) {
 	} catch {
 		return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
 	}
+	return performJsonClip(reqBody, request.url, env, request.headers.get('X-Clip-Method'));
+}
 
+// 同步 /json 与异步 /json-async（Workflow step 内）共用的剪藏主体。
+// requestUrl 是原始请求 URL 字符串（Workflow 里没有真实 Request 对象），
+// clipMethodHeader 来自 X-Clip-Method（异步路径从 requestBody.clipMethod 透传）。
+async function performJsonClip(reqBody, requestUrl, env, clipMethodHeader) {
 	const url = reqBody.url;
 	if (!url || typeof url !== 'string') {
 		return Response.json({ error: "Missing 'url' field" }, { status: 400, headers: corsHeaders(env) });
@@ -131,14 +150,104 @@ async function handleJsonClipRequest(request, env) {
 			waitForSelector: reqBody.waitForSelector,
 		});
 		return await clipArticle({
-			requestUrl: request.url,
+			requestUrl,
 			article,
 			env,
-			clipMethod: normalizeClipMethod(request.headers.get('X-Clip-Method')),
+			clipMethod: normalizeClipMethod(clipMethodHeader),
 		});
 	} catch (e) {
 		console.error('Jina fetch failed:', url, e.message);
 		return Response.json({ error: `Source fetch failed: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
+	}
+}
+
+// 阶段四C：异步剪藏入口——把请求体投进 Workflow，立刻 202，不等剪藏结果。
+// 明显坏的请求（缺/坏 url）在入队前就拒绝，不烧 Workflow 配额。
+async function handleAsyncClipRequest(request, env) {
+	const workflow = env.CLIP_WORKFLOW;
+	if (!workflow || typeof workflow.create !== 'function') {
+		return Response.json({ error: 'Async clip not available (CLIP_WORKFLOW binding missing)' }, { status: 501, headers: corsHeaders(env) });
+	}
+
+	let reqBody;
+	try {
+		reqBody = await request.json();
+	} catch {
+		return Response.json({ error: 'Invalid JSON body' }, { status: 400, headers: corsHeaders(env) });
+	}
+
+	const url = reqBody.url;
+	if (!url || typeof url !== 'string' || !isValidUrl(url)) {
+		return Response.json({ error: 'Missing or invalid url field' }, { status: 400, headers: corsHeaders(env) });
+	}
+
+	const instance = await workflow.create({
+		params: [
+			{
+				requestBody: reqBody,
+				requestUrl: request.url,
+				// Workflow 里没有 headers；X-Clip-Method 的异步等价物放 body 里。
+				clipMethodHeader: reqBody.clipMethod || '',
+			},
+		],
+	});
+
+	return Response.json(
+		{ ok: true, workflowId: instance.id, statusUrl: `/clip-status?id=${encodeURIComponent(instance.id)}` },
+		{ status: 202, headers: corsHeaders(env) },
+	);
+}
+
+// 阶段四C：异步剪藏状态轮询。挂在外圈路由（GET 不走 POST 门禁），自带同款 Bearer 校验。
+async function handleClipStatusRequest(request, env) {
+	const requestUrl = new URL(request.url);
+	const id = requestUrl.searchParams.get('id');
+	if (!id) {
+		return Response.json({ error: "Missing 'id' param" }, { status: 400, headers: corsHeaders(env) });
+	}
+
+	const auth = request.headers.get('Authorization') || '';
+	if (!env.API_KEY) {
+		// Fail closed: an unset API_KEY would otherwise accept "Bearer undefined".
+		return Response.json({ error: 'Server auth not configured (set API_KEY)' }, { status: 500, headers: corsHeaders(env) });
+	}
+	if (!timingSafeEqualStrings(auth, `Bearer ${env.API_KEY}`)) {
+		return Response.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(env) });
+	}
+
+	const workflow = env.CLIP_WORKFLOW;
+	if (!workflow || typeof workflow.get !== 'function') {
+		return Response.json({ error: 'Async clip not available (CLIP_WORKFLOW binding missing)' }, { status: 501, headers: corsHeaders(env) });
+	}
+
+	try {
+		const instance = workflow.get(id);
+		if (!instance || typeof instance.status !== 'function') {
+			// 本地 `wrangler dev` 的 workflow 模拟不含 instance.status()（2026-09 实证，
+			// 见 src/clip-workflow.js 头部）：给一个明确的 errored 终态，
+			// 而不是让 TypeError 伪装成误导性的 404 "instance not found"。
+			// 真实 Workers runtime 的 instance 恒有 status()，此分支只会在本地出现。
+			return Response.json(
+				{
+					workflowId: id,
+					status: 'errored',
+					error: 'local dev: workflow status API unavailable (local emulation has no instance.status; run() cannot execute locally)',
+				},
+				{ headers: corsHeaders(env) },
+			);
+		}
+		const status = await instance.status();
+		const out = { workflowId: id, status: status.status };
+		if (status.status === 'complete' && status.output) {
+			// run() 的返回值 = step 结果 { status, body }。
+			out.result = status.output;
+		} else if (status.status === 'errored') {
+			out.error = status.error?.message || 'workflow errored';
+		}
+		return Response.json(out, { headers: corsHeaders(env) });
+	} catch (e) {
+		// 本地/远端对不存在的 id 都会炸（instance.not_found）。
+		return Response.json({ error: e.message || 'instance not found' }, { status: 404, headers: corsHeaders(env) });
 	}
 }
 

@@ -572,6 +572,15 @@ Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 
 完整部署步骤仍然看 [DEPLOYMENT.md](./DEPLOYMENT.md)。
 
+## 异步剪藏 Workflows
+
+POST `/json-async` 把剪藏请求投进 Cloudflare Workflow（返回 `202` + `workflowId` + `statusUrl`），引擎在服务端把完整链路跑完（提取 → AI 增强 → FNS/Telegraph/Telegram 双写），客户端随时断开；结果用 `GET /clip-status?id=` 轮询，直到 `complete` / `errored` 终态。
+
+约束与降级（2026-09 实证，详见 `src/clip-workflow.js` 头部注释）：
+
+- Workflow 类必须 `extends WorkflowEntrypoint`，该基类由 `cloudflare:workflows` 提供；本地 `wrangler dev` 的模拟模块**不导出**它（实测 wrangler 4.91/4.130 × compat flags 全矩阵），静态 import 会在模块 link 阶段直接炸掉本地 dev。
+- 因此代码用顶层动态 import：真 runtime（部署后）和 vitest（alias 到 mock）拿到真基类；本地 dev 拿不到时降级到 stub 基类——服务照常起、`/json-async` 照常 `202`，但 run 无法执行，`/clip-status` 轮询会得到 `status: "errored"` 加明确文案，不伪造成功。
+
 ## 设计取舍
 
 这套系统刻意做了几个反直觉的简化：

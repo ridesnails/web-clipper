@@ -4,6 +4,17 @@
 
 格式参考 Keep a Changelog，版本语义当前以时间点为主，后续如引入正式版本号可继续沿用。
 
+## [Unreleased]
+
+### Added
+
+- 新增阶段四C异步剪藏 Workflows：`POST /json-async`（202 + workflowId）入队，`GET /clip-status?id=` 轮询终态；引擎服务端跑完整剪藏链，客户端断开不再丢失结果。
+- `wrangler.jsonc` 新增 `workflows` 绑定（`web-clipper-clip` / `ClipWorkflow`）；测试沿用纯 Node vitest，`cloudflare:workflows` 由 `test/mocks/cloudflare-workflows.js` alias 提供。
+
+### Fixed
+
+- 本地 `wrangler dev` 兼容性：`cloudflare:workflows` 在本地模拟环境不导出 `WorkflowEntrypoint`（实测与 wrangler 版本/compat flags 无关），改为顶层动态 import + 本地 stub 降级；`/clip-status` 对缺 `instance.status()` 的本地实例返回明确 `errored` 终态，不再伪装成误导性 404。
+
 ## [0.1.0] - 2026-05-23
 
 ### Added
