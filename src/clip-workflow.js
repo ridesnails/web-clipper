@@ -7,33 +7,16 @@
 // "worker is not an actor but class name was requested"。
 //
 // 本仓库刻意不用 @cloudflare/vitest-pool-workers（纯 Node vitest，见 vitest.config.js），
-// `cloudflare:workflows` 在测试环境由 test/mocks/cloudflare-workflows.js alias 提供 stub 基类。
+// 两个 runtime 模块在测试环境由 test/mocks/cloudflare-workflows.js alias 提供 stub 基类。
 //
-// 何时拿到哪个基类（本地 workerd 实证 2026-09，wrangler 4.91/4.130 × compat-flags 全矩阵）：
-// - 真实 Workers runtime（deploy 后）＋ vitest（alias 指向 mocks）：模块提供真 WorkflowEntrypoint；
-// - 本地 `wrangler dev`：workerd 的 cloudflare:workflows 模块只导出 NonRetryableError、
-//   不提供 WorkflowEntrypoint，静态 import 会让 dev 启动即死（linking SyntaxError）。
-// 因此这里改用运行时动态 import：真类存在就用真类；拿不到就降级本地 stub，
-// dev 服务器照常启动、/json-async 202 全流程可达；run() 触发本地引擎缺口时
-// 由下方 localStub 保护给出明确报错并进 terminal errored（见 run 开头）。
-// 另：本地 emu 的实例句柄没有 instance.status()（实证同上），/clip-status 轮询
-// 由 src/index.js 的同步守卫返回明确 errored 终态（而非误导性 404）。
-let WorkflowEntrypoint;
-try {
-	({ WorkflowEntrypoint } = await import('cloudflare:workflows'));
-} catch {
-	// 模块整个不可用的极端环境——直接走下方 stub 降级。
-}
-if (typeof WorkflowEntrypoint !== 'function') {
-	class LocalWorkflowStub {
-		static localStub = true;
-		constructor(ctx, env) {
-			this.ctx = ctx;
-			this.env = env;
-		}
-	}
-	WorkflowEntrypoint = LocalWorkflowStub;
-}
+// 模块指定符考证（2026-09-10 部署实证 + 官方文档 Workflows get-started/guide）：
+// WorkflowEntrypoint 来自 `cloudflare:workers`，而不是 `cloudflare:workflows`！
+// 后者在 prod 上传校验（10021 SyntaxError: does not provide an export named
+// 'WorkflowEntrypoint'）和本地 dev（linking SyntaxError）里都没有该导出——
+// 曾记录的「本地 emulation 缺 WorkflowEntrypoint」结论系误诊，真正的坑只是模块名写错。
+// 另注：把类改成顶层动态 import + stub 基类同样过不了——上传校验器只认静态导出（
+// "Workflow ClipWorkflow must be exported"），故必须静态 import 真模块。
+import { WorkflowEntrypoint } from 'cloudflare:workers';
 
 // 剪藏主体由 worker 入口注册进来（src/index.js 顶层 registerClipHandler(performJsonClip)）。
 // 反向注入避免 clip-workflow → index.js 的循环 import。
@@ -45,13 +28,6 @@ export function registerClipHandler(fn) {
 
 export class ClipWorkflow extends WorkflowEntrypoint {
 	async run(event, step) {
-		if (this.constructor.localStub === true) {
-			// 本地 dev 无真 workflow 引擎（见文件头 2026-09 实证注释）：
-			// 不伪装成功，直接给明确错误 → 门面发 terminal errored。
-			throw new Error(
-				'clip workflow requires the real Workers runtime; local `wrangler dev` cannot execute workflows (WorkflowEntrypoint unavailable in local emulation)',
-			);
-		}
 		return await step.do(
 			'perform-clip',
 			// 重试间隔 120s > ClipLock 的 90s TTL：重试时上次 attempt 的锁早已过期；

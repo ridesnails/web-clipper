@@ -578,8 +578,8 @@ POST `/json-async` 把剪藏请求投进 Cloudflare Workflow（返回 `202` + `w
 
 约束与降级（2026-09 实证，详见 `src/clip-workflow.js` 头部注释）：
 
-- Workflow 类必须 `extends WorkflowEntrypoint`，该基类由 `cloudflare:workflows` 提供；本地 `wrangler dev` 的模拟模块**不导出**它（实测 wrangler 4.91/4.130 × compat flags 全矩阵），静态 import 会在模块 link 阶段直接炸掉本地 dev。
-- 因此代码用顶层动态 import：真 runtime（部署后）和 vitest（alias 到 mock）拿到真基类；本地 dev 拿不到时降级到 stub 基类——服务照常起、`/json-async` 照常 `202`，但 run 无法执行，`/clip-status` 轮询会得到 `status: "errored"` 加明确文案，不伪造成功。
+- Workflow 类必须 `extends WorkflowEntrypoint`，该基类由 **`cloudflare:workers`** 提供（官方模块指定符；`cloudflare:workflows` 里没有它——曾把两者搞混，prod 上传校验 10021 与本地 dev link 阶段双双当场炸出 SyntaxError，2026-09-10 实证）。
+- 测试环境（纯 Node vitest）由 `test/mocks/cloudflare-workflows.js` alias 同时顶替 `cloudflare:workers` / `cloudflare:workflows`；本地 `wrangler dev` 不执行真 workflow 引擎——`/json-async` 照常 `202`，但 `status()` 不可用，`/clip-status` 轮询得到 `status: "errored"` 加明确文案，不伪造成功。
 
 ## 设计取舍
 

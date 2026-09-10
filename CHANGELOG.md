@@ -9,11 +9,11 @@
 ### Added
 
 - 新增阶段四C异步剪藏 Workflows：`POST /json-async`（202 + workflowId）入队，`GET /clip-status?id=` 轮询终态；引擎服务端跑完整剪藏链，客户端断开不再丢失结果。
-- `wrangler.jsonc` 新增 `workflows` 绑定（`web-clipper-clip` / `ClipWorkflow`）；测试沿用纯 Node vitest，`cloudflare:workflows` 由 `test/mocks/cloudflare-workflows.js` alias 提供。
+- `wrangler.jsonc` 新增 `workflows` 绑定（`web-clipper-clip` / `ClipWorkflow`）；测试沿用纯 Node vitest，`cloudflare:workers` / `cloudflare:workflows` 由 `test/mocks/cloudflare-workflows.js` 双 alias 提供 stub。
 
 ### Fixed
 
-- 本地 `wrangler dev` 兼容性：`cloudflare:workflows` 在本地模拟环境不导出 `WorkflowEntrypoint`（实测与 wrangler 版本/compat flags 无关），改为顶层动态 import + 本地 stub 降级；`/clip-status` 对缺 `instance.status()` 的本地实例返回明确 `errored` 终态，不再伪装成误导性 404。
+- 关键勘误（2026-09-10 部署实证）：`WorkflowEntrypoint` 实际由 `cloudflare:workers` 导出而非 `cloudflare:workflows`——prod 上传校验 10021 SyntaxError 与早前本地 dev link 炸同根因（模块名写错）；动态 import + stub 也过不了 prod 校验器（只认静态导出）。已改为静态 `import { WorkflowEntrypoint } from 'cloudflare:workers'`；本地 dev 不执行 workflow 引擎，`/clip-status` 对缺 `instance.status()` 的本地实例返回明确 `errored` 终态，不再伪装成误导性 404。
 
 ## [0.1.0] - 2026-05-23
 
