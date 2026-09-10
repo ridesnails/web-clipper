@@ -1,3 +1,9 @@
+/*
+ * Vendor copy: turndown v7.2.4 lib/turndown.cjs.js（与 npm 包逐字节一致）。
+ * 运行时只 import 这份副本（见 singlefile.js）；package.json 里的 `turndown`
+ * 不被任何源码 require，仅为记录 vendor 来源。升级时与
+ * node_modules/turndown/lib/turndown.cjs.js 重新 diff 后整文件替换。
+ */
 'use strict';
 
 function extend(destination) {

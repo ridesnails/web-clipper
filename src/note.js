@@ -1,4 +1,4 @@
-import { getHostname, formatTagLine, yamlEscape } from './utils.js';
+import { getHostname, formatTagLine, yamlEscape, formatChinaDateTime } from './utils.js';
 
 export function makeSlug(title) {
 	return (
@@ -52,22 +52,11 @@ export function buildNote({ title, url, date, body, summary, tags = [], clipMeth
 }
 
 export function buildClipUpdateAppend(existingContent, clippedAt, clipMethod) {
-	const line = `- ${formatClipLogTime(clippedAt)} 再次剪藏，来源 ${describeClipMethod(clipMethod)}`;
+	const line = `- ${formatChinaDateTime(clippedAt)} 再次剪藏，来源 ${describeClipMethod(clipMethod)}`;
 	if (String(existingContent || '').includes('## 🔄 剪藏更新记录')) {
 		return `\n${line}`;
 	}
 	return `\n\n## 🔄 剪藏更新记录\n\n${line}`;
-}
-
-function formatClipLogTime(date) {
-	const china = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-	const year = china.getUTCFullYear();
-	const month = String(china.getUTCMonth() + 1).padStart(2, '0');
-	const day = String(china.getUTCDate()).padStart(2, '0');
-	const hour = String(china.getUTCHours()).padStart(2, '0');
-	const minute = String(china.getUTCMinutes()).padStart(2, '0');
-	const second = String(china.getUTCSeconds()).padStart(2, '0');
-	return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
 function describeClipMethod(clipMethod) {

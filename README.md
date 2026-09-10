@@ -561,6 +561,7 @@ Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 - `AI_API_KEY`
 - `AI_BASE_URL`
 - `AI_MODEL`
+- `AI_JSON_MODE`（可选；设 `off` 关闭 AI 请求的 json_object 模式，用于不认该参数的 OpenAI 兼容端点）
 
 建议顺序：
 

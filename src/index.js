@@ -10,7 +10,7 @@ import { extractArticleViaChain } from './extractor-chain.js';
 import { writeToFns, fetchFnsFileContent, saveFileToFns } from './fns.js';
 import { makeSlug, buildNote } from './note.js';
 import { generateAiMetadata } from './ai.js';
-import { isValidUrl, escapeHtml, escapeHtmlAttr, getHostname, resolveUrl, formatTagLine } from './utils.js';
+import { isValidUrl, escapeHtml, escapeHtmlAttr, getHostname, resolveUrl, formatTagLine, chinaYearMonth } from './utils.js';
 
 // Durable Object classes must be exported from the worker entry to receive bindings.
 export { ClipLock } from './clip-lock.js';
@@ -44,6 +44,10 @@ const worker = {
 
 		if (pathname === '/telegram-webhook') {
 			return handleTelegramWebhook(request, env);
+		}
+
+		if (pathname === '/health' && request.method === 'GET') {
+			return handleHealthRequest(request, env);
 		}
 
 		if (request.method === 'OPTIONS') {
@@ -134,7 +138,7 @@ async function handleJsonClipRequest(request, env) {
 		});
 	} catch (e) {
 		console.error('Jina fetch failed:', url, e.message);
-		return Response.json({ error: `Jina error: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
+		return Response.json({ error: `Source fetch failed: ${e.message}` }, { status: 502, headers: corsHeaders(env) });
 	}
 }
 
@@ -166,7 +170,7 @@ async function handleSaveMdRequest(request, env) {
 
 	const slug = makeSlug(title);
 	const now = new Date();
-	const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+	const yyyymm = chinaYearMonth(now);
 	const timestamp = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 	const convUrl = conversationId ? `ai://conv/${conversationId}` : `ai://conv/${timestamp}`;
 
@@ -230,7 +234,7 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 	let { title, url, markdownBody, sourceHtml } = article;
 	const slug = makeSlug(title);
 	const now = new Date();
-	const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+	const yyyymm = chinaYearMonth(now);
 	const timestamp = now
 		.toISOString()
 		.replace(/[-:]/g, '')
@@ -355,9 +359,13 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 	}
 
 	await releaseClipLock(clipLock, env);
+	// partial：请求里明确要的写（FNS 必算；Telegraph 仅在启用时算）任一失败 = true。
+	// 状态码保持 200——已有写入成功就值得返回链接，客户端看 partial 决定是否重试补齐。
+	const partial = !fnsOk || (telegraphEnabled && !telegraphOk);
 	return Response.json(
 		{
 			ok: true,
+			partial,
 			title,
 			fnsOk,
 			mode: fnsOk ? fnsData.mode : undefined,
@@ -383,24 +391,26 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 			? extractHtmlImageUrls(uploadedHtml || fetchedHtml, articleUrl)
 			: extractImageUrls(cleanBody).map((imgUrl) => ({ raw: imgUrl, absolute: imgUrl }));
 
-	const imageMappings = [];
-	for (const imageItem of imageItems) {
+	// Telegraph 路的图片上传与 inline 路共用并发上限（3）：串行循环在多图
+	// 文章上会把整段剪藏拖到分钟级；runWithConcurrency 按下标保序返回。
+	const imageTasks = imageItems.map((imageItem) => async () => {
+		const imgUrl = imageItem.absolute;
+		if (!isSsrfSafeUrl(imgUrl)) {
+			console.warn('SSRF guard blocked article image fetch:', imgUrl);
+			return null;
+		}
 		try {
-			const imgUrl = imageItem.absolute;
-			if (!isSsrfSafeUrl(imgUrl)) {
-				console.warn('SSRF guard blocked article image fetch:', imgUrl);
-				continue;
-			}
 			const imgRes = await fetch(imgUrl, { signal: AbortSignal.timeout(15000) });
-			if (imgRes.ok) {
-				const buffer = new Uint8Array(await imgRes.arrayBuffer());
-				const uploadResult = await sendPhoto(buffer, 'image.jpg', env);
-				imageMappings.push({ raw: imageItem.raw, absolute: imgUrl, file_id: uploadResult.file_id });
-			}
+			if (!imgRes.ok) return null;
+			const buffer = new Uint8Array(await imgRes.arrayBuffer());
+			const uploadResult = await sendPhoto(buffer, 'image.jpg', env);
+			return { raw: imageItem.raw, absolute: imgUrl, file_id: uploadResult.file_id };
 		} catch (e) {
 			console.error('Image upload failed:', imageItem.absolute, e.message);
+			return null;
 		}
-	}
+	});
+	const imageMappings = (await runWithConcurrency(imageTasks, INLINE_IMAGE_UPLOAD_CONCURRENCY)).filter(Boolean);
 
 	let telegraphHtml = telegraphHtmlSource;
 	const publicBaseUrl = resolvePublicBaseUrl(requestUrl, env.PUBLIC_BASE_URL);
@@ -512,6 +522,29 @@ async function runWithConcurrency(tasks, concurrency) {
 
 	await Promise.all(workers);
 	return results;
+}
+
+// /health：免鉴权只吐 {ok:true}（探活用，不泄露配置面）；
+// 带正确 Bearer 才追加能力布尔 map——binding/env 存在性，不吐任何值。
+// 放行在鉴权门之前（GET-only），防止“服务器没配 API_KEY 时连健康检查都 5xx”。
+async function handleHealthRequest(request, env) {
+	const base = { ok: true };
+	const auth = request.headers.get('Authorization') || '';
+	const authorized = Boolean(env.API_KEY) && timingSafeEqualStrings(auth, `Bearer ${env.API_KEY}`);
+	if (!authorized) return Response.json(base);
+	return Response.json({
+		ok: true,
+		capabilities: {
+			fns: Boolean(env.FNS_API_KEY),
+			telegraph: Boolean(env.TELEGRAPH_ACCESS_TOKEN),
+			telegramImg: Boolean(env.IMG_BOT || env.TELEGRAM_BOT_TOKEN),
+			telegramClip: Boolean(env.CLIP_BOT || env.TELEGRAM_BOT_TOKEN),
+			ai: Boolean(env.AI_API_KEY),
+			kv: Boolean(env.CLIP_KV),
+			browser: Boolean(env.BROWSER),
+			defuddleFallback: env.DEFUDDLE_FALLBACK === 'true',
+		},
+	});
 }
 
 async function handleTelegramWebhook(request, env) {

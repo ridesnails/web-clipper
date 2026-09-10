@@ -2,6 +2,17 @@ import { fetchWithTimeout } from './http.js';
 
 const AI_REQUEST_TIMEOUT_MS = 20000;
 
+// 长文只送头尾（头 9000 + 尾 3000，总预算与旧版 12000 一致）：
+// 只取头部会丢结尾，摘要/标签两端信息都有价值；中间以省略标记衔接。
+const PROMPT_BODY_HEAD_CHARS = 9000;
+const PROMPT_BODY_TAIL_CHARS = 3000;
+
+export function truncateBodyForPrompt(body) {
+	const text = String(body || '');
+	if (text.length <= PROMPT_BODY_HEAD_CHARS + PROMPT_BODY_TAIL_CHARS) return text;
+	return `${text.slice(0, PROMPT_BODY_HEAD_CHARS)}\n……（中间内容省略）……\n${text.slice(-PROMPT_BODY_TAIL_CHARS)}`;
+}
+
 export async function generateAiMetadata({ title, url, body, env }) {
 	if (!env.AI_API_KEY) return null;
 	const baseUrl = (env.AI_BASE_URL || 'https://api.siliconflow.cn/v1').replace(/\/$/, '');
@@ -14,7 +25,7 @@ export async function generateAiMetadata({ title, url, body, env }) {
 		`标题：${title}`,
 		`原始链接：${url}`,
 		'正文：',
-		body.slice(0, 12000),
+		truncateBodyForPrompt(body),
 	].join('\n');
 	const res = await fetchWithTimeout(
 		`${baseUrl}/chat/completions`,
@@ -27,7 +38,9 @@ export async function generateAiMetadata({ title, url, body, env }) {
 			body: JSON.stringify({
 				model,
 				temperature: 0.2,
-				response_format: { type: 'json_object' },
+				// json_object 模式多数 OpenAI 兼容端点支持；个别端点不认会 400，
+				// 设 AI_JSON_MODE=off 关闭（未设置 = 默认开启，维持原行为）。
+				...(env.AI_JSON_MODE === 'off' ? {} : { response_format: { type: 'json_object' } }),
 				messages: [
 					{ role: 'system', content: 'You generate concise article metadata in JSON.' },
 					{ role: 'user', content: prompt },

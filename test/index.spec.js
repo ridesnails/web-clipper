@@ -880,6 +880,8 @@ Body.`;
 		const json = await response.json();
 		expect(json.ok).toBe(true);
 		expect(json.fnsOk).toBe(false);
+		// FNS 写失败但 Telegraph 成功 = 部分成功，partial 必须为 true（客户端可据补齐）
+		expect(json.partial).toBe(true);
 		expect(json.path).toBeUndefined();
 		expect(json.telegraphOk).toBe(true);
 		expect(json.telegraphUrl).toBe('https://telegra.ph/Test-05-21');
