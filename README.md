@@ -576,6 +576,74 @@ Worker 会提取消息中的第一个 `http/https` 链接并执行剪藏。
 
 POST `/json-async` 把剪藏请求投进 Cloudflare Workflow（返回 `202` + `workflowId` + `statusUrl`），引擎在服务端把完整链路跑完（提取 → AI 增强 → FNS/Telegraph/Telegram 双写），客户端随时断开；结果用 `GET /clip-status?id=` 轮询，直到 `complete` / `errored` 终态。
 
+### 异步用法示例
+
+#### 提交异步剪藏
+
+```bash
+curl -sS -X POST https://web-clipper.<your>.workers.dev/json-async \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com"}'
+```
+
+立即返回 `202`，可断开连接（`statusUrl` 是相对路径，拼在 Worker 域名后就是轮询地址）：
+
+```json
+{ "ok": true, "workflowId": "e8af2f1b-…", "statusUrl": "/clip-status?id=e8af2f1b-…" }
+```
+
+#### 轮询结果
+
+```bash
+curl -sS "https://web-clipper.<your>.workers.dev/clip-status?id=<workflowId>" \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+轮询直到 `status` 变为终态（链路含 Jina 提取 + AI 增强 + 双写，实测 10~90 秒）。`complete` 时的 `result.body` 就是同步接口的完整响应体：
+
+```json
+{
+  "workflowId": "e8af2f1b-…",
+  "status": "complete",
+  "result": {
+    "status": 200,
+    "body": {
+      "ok": true,
+      "partial": false,
+      "title": "Example Domain",
+      "fnsOk": true,
+      "mode": "created",
+      "path": "clips/example-domain.md",
+      "telegraphOk": true,
+      "telegraphUrl": "https://telegra.ph/example-domain-09-10",
+      "telegramMessageId": 321
+    }
+  }
+}
+```
+
+一行式轮询（每 5 秒一次，最多 2 分钟，`jq` 判终态）：
+
+```bash
+for i in $(seq 1 24); do
+  r=$(curl -sS "https://web-clipper.<your>.workers.dev/clip-status?id=<workflowId>" \
+      -H "Authorization: Bearer <your-api-key>")
+  echo "$r" | jq -re '.status | select(. == "complete" or . == "errored")' >/dev/null && break
+  sleep 5
+done; echo "$r" | jq .
+```
+
+#### 状态与错误码
+
+| `status` | 含义 |
+| --- | --- |
+| `queued` / `running` | 排队 / 执行中，继续轮询 |
+| `complete` | 成功，读 `result.body`（即同步接口响应体） |
+| `errored` | 失败，`error` 字段给原因；同 URL 重提会走幂等补齐，不产生重复页 |
+
+HTTP 侧：`400` 缺 `url` / 非法 JSON 体；`401` 鉴权失败；`404` id 不存在；`501` 未绑 `CLIP_WORKFLOW`（本地 `wrangler dev` 即此情形，见下方约束）。`result.body.partial = true` 表示部分写入失败（如 FNS 通了但 Telegraph 挂了），重提同 URL 借幂等记录补齐即可。
+
 约束与降级（2026-09 实证，详见 `src/clip-workflow.js` 头部注释）：
 
 - Workflow 类必须 `extends WorkflowEntrypoint`，该基类由 **`cloudflare:workers`** 提供（官方模块指定符；`cloudflare:workflows` 里没有它——曾把两者搞混，prod 上传校验 10021 与本地 dev link 阶段双双当场炸出 SyntaxError，2026-09-10 实证）。
