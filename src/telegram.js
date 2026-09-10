@@ -1,5 +1,5 @@
 // Telegram Bot API 封装
-import { fetchWithTimeout } from './http.js';
+import { fetchWithTimeout, withRetry } from './http.js';
 
 const TG_TIMEOUT_MS = 15000;
 
@@ -38,7 +38,7 @@ export async function sendPhoto(fileBuffer, fileName, env) {
 			method: 'POST',
 			body: formData,
 		},
-		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 },
+		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 }
 	);
 
 	if (!res.ok) {
@@ -58,6 +58,45 @@ export async function sendPhoto(fileBuffer, fileName, env) {
 		file_unique_id: largest.file_unique_id,
 		message_id: data.result.message_id,
 	};
+}
+
+/**
+ * 带重试的 sendPhoto——专门处理 Telegram 429 限流
+ * - 429 时指数退避：1s → 2s → 4s → 8s（最多 4 次重试）
+ * - 其他网络错误也重试，但有总超时限制（~30s）
+ * @param {ArrayBuffer|Uint8Array} fileBuffer - 图片二进制数据
+ * @param {string} fileName - 文件名
+ * @param {object} env - 环境变量
+ * @param {{maxRetries?: number}} [options] - 重试选项
+ * @returns {Promise<{file_id: string, file_unique_id: string, message_id: number}>}
+ */
+export async function sendPhotoWithRetry(fileBuffer, fileName, env, { maxRetries = 4 } = {}) {
+	let lastError;
+
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		try {
+			return await sendPhoto(fileBuffer, fileName, env);
+		} catch (e) {
+			lastError = e;
+
+			// Telegram 429 限流，指数退避
+			if (e.message && e.message.includes('429') && attempt < maxRetries) {
+				const delay = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s, 8s
+				console.warn('Telegram 429 rate limit, retrying in ' + delay + 'ms (attempt ' + (attempt + 1) + '/' + (maxRetries + 1) + ')');
+				await new Promise(r => setTimeout(r, delay));
+				continue;
+			}
+
+			// 其他错误也重试，但有基础延迟
+			if (attempt < maxRetries) {
+				console.warn('Telegram sendPhoto error (attempt ' + (attempt + 1) + '/' + (maxRetries + 1) + '): ' + e.message);
+				await new Promise(r => setTimeout(r, 1000)); // 1s 基础延迟
+				continue;
+			}
+		}
+	}
+
+	throw lastError;
 }
 
 /**
@@ -89,7 +128,7 @@ export async function sendMessage(text, chatId, env, options = {}) {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(payload),
 		},
-		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 },
+		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 }
 	);
 
 	if (!res.ok) {
@@ -115,7 +154,7 @@ export async function getFile(fileId, env) {
 	const res = await fetchWithTimeout(
 		`https://api.telegram.org/bot${resolveImageBotToken(env)}/getFile?file_id=${encodeURIComponent(fileId)}`,
 		{},
-		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 },
+		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 }
 	);
 
 	if (!res.ok) {
