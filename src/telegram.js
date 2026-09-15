@@ -106,6 +106,44 @@ export async function sendMessage(text, chatId, env, options = {}) {
 }
 
 /**
+ * 发送封面图富通知：photoUrl 为公网 URL，由 Telegram 服务器自行拉取
+ * @param {string} photoUrl - 图片公网 URL
+ * @param {string} caption - 说明文字（支持 HTML，上限 1024 字符）
+ * @param {string} chatId - 目标聊天 ID
+ * @param {object} env - 环境变量，需包含 CLIP_BOT（兼容旧 TELEGRAM_BOT_TOKEN）
+ * @returns {Promise<{message_id: number}>}
+ */
+export async function sendPhotoNotification(photoUrl, caption, chatId, env) {
+	const payload = {
+		chat_id: resolveClipChatId(chatId, env),
+		photo: photoUrl,
+		caption,
+		parse_mode: 'HTML',
+	};
+	const res = await fetchWithTimeout(
+		`https://api.telegram.org/bot${resolveClipBotToken(env)}/sendPhoto`,
+		{
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(payload),
+		},
+		{ timeoutMs: TG_TIMEOUT_MS, retries: 0 },
+	);
+
+	if (!res.ok) {
+		const err = await res.json().catch(() => ({}));
+		throw new Error(`Telegram sendPhoto (notification) failed: ${err.description || res.status}`);
+	}
+
+	const data = await res.json();
+	if (!data.ok) {
+		throw new Error(`Telegram sendPhoto (notification) failed: ${data.description}`);
+	}
+
+	return { message_id: data.result.message_id };
+}
+
+/**
  * 调用 getFile API 获取 Telegram 文件信息
  * @param {string} fileId - Telegram 文件 ID
  * @param {object} env - 环境变量，需包含 IMG_BOT（兼容旧 TELEGRAM_BOT_TOKEN）

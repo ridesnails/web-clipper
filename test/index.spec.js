@@ -772,6 +772,10 @@ Body.`;
 				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`,
 				response: jsonResponse({ ok: true, result: { message_id: 100 } }),
 			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendPhoto`,
+				response: jsonResponse({ ok: true, result: { message_id: 555 } }),
+			},
 		]);
 
 		const request = new Request('http://127.0.0.1:8787', {
@@ -854,6 +858,10 @@ Body.`;
 				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`,
 				response: jsonResponse({ ok: true, result: { message_id: 100 } }),
 			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendPhoto`,
+				response: jsonResponse({ ok: true, result: { message_id: 555 } }),
+			},
 		]);
 
 		const request = new Request('http://127.0.0.1:8787', {
@@ -883,6 +891,165 @@ Body.`;
 		expect(serializedNodes).not.toContain('https://example.com/img-2.jpg');
 		// 超限第 3 张保留原 URL，正文照常返回
 		expect(serializedNodes).toContain('https://example.com/img-3.jpg');
+	});
+
+	it('POST / sends photo notification via CLIP_BOT sendPhoto', async () => {
+		const markdownWithImage = `Title: Test Article
+URL Source: https://example.com/article
+Published Time: 2024-01-01
+Markdown Content:
+
+# Test Article
+
+Body.`;
+		const sourceHtml = '<article><h1>HTML Article</h1><img src="/img-1.jpg"><p>Body.</p></article>';
+		installFetchRouter([
+			{
+				match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
+				response: new Response(markdownWithImage, { status: 200 }),
+			},
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsCreateResponse(),
+			},
+			{
+				match: (url) => url === 'https://example.com/article',
+				response: new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }),
+			},
+			{
+				match: (url) => url.startsWith('https://example.com/img-'),
+				response: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } }),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`,
+				response: () => jsonResponse({
+					ok: true,
+					result: {
+						message_id: 77,
+						photo: [{ file_id: 'photo-file-1', file_unique_id: 'uniq-1', width: 800 }],
+					},
+				}),
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendPhoto`,
+				response: jsonResponse({ ok: true, result: { message_id: 555 } }),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`,
+				response: jsonResponse({ ok: true, result: { message_id: 100 } }),
+			},
+		]);
+		const request = new Request('http://127.0.0.1:8787', {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${mockEnv.API_KEY}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ url: 'https://example.com/article' }),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, telegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.telegraphOk).toBe(true);
+		expect(json.telegramMessageId).toBe(555);
+		const clipSendPhotoCalls = fetchMock.mock.calls.filter((call) => call[0] === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendPhoto`);
+		expect(clipSendPhotoCalls.length).toBe(1);
+		const notifyPayload = JSON.parse(clipSendPhotoCalls[0][1].body);
+		expect(notifyPayload.chat_id).toBe('987654321');
+		expect(notifyPayload.photo.startsWith(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1&sig=`)).toBe(true);
+		expect(notifyPayload.caption.startsWith('https://telegra.ph/Test-05-21')).toBe(true);
+		expect(notifyPayload.parse_mode).toBe('HTML');
+		const clipSendMessageCalls = fetchMock.mock.calls.filter((call) => call[0] === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`);
+		expect(clipSendMessageCalls.length).toBe(0);
+	});
+
+	it('POST / falls back to sendMessage when CLIP_BOT sendPhoto fails', async () => {
+		const markdownWithImage = `Title: Test Article
+URL Source: https://example.com/article
+Published Time: 2024-01-01
+Markdown Content:
+
+# Test Article
+
+Body.`;
+		const sourceHtml = '<article><h1>HTML Article</h1><img src="/img-1.jpg"><p>Body.</p></article>';
+		installFetchRouter([
+			{
+				match: (url, init) => url === 'https://r.jina.ai/' && init.method === 'POST',
+				response: new Response(markdownWithImage, { status: 200 }),
+			},
+			{
+				match: (url) => url.includes('/api/notes?'),
+				response: fnsListResponse([]),
+			},
+			{
+				match: (url) => url === `${mockEnv.FNS_BASE}/api/note`,
+				response: fnsCreateResponse(),
+			},
+			{
+				match: (url) => url === 'https://example.com/article',
+				response: new Response(sourceHtml, { status: 200, headers: { 'Content-Type': 'text/html' } }),
+			},
+			{
+				match: (url) => url.startsWith('https://example.com/img-'),
+				response: () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } }),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.IMG_BOT}/sendPhoto`,
+				response: () => jsonResponse({
+					ok: true,
+					result: {
+						message_id: 77,
+						photo: [{ file_id: 'photo-file-1', file_unique_id: 'uniq-1', width: 800 }],
+					},
+				}),
+			},
+			{
+				match: (url) => url === 'https://api.telegra.ph/createPage',
+				response: jsonResponse({
+					ok: true,
+					result: { url: 'https://telegra.ph/Test-05-21', path: 'Test-05-21', title: 'Test' },
+				}),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendPhoto`,
+				response: jsonResponse({ ok: false, description: 'Bad Request: PHOTO_INVALID_DIMENSIONS' }, 400),
+			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`,
+				response: jsonResponse({ ok: true, result: { message_id: 100 } }),
+			},
+		]);
+		const request = new Request('http://127.0.0.1:8787', {
+			method: 'POST',
+			headers: { Authorization: `Bearer ${mockEnv.API_KEY}`, 'Content-Type': 'application/json' },
+			body: JSON.stringify({ url: 'https://example.com/article' }),
+		});
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, telegraphEnv, ctx);
+		await waitOnExecutionContext(ctx);
+		expect(response.status).toBe(200);
+		const json = await response.json();
+		expect(json.telegraphOk).toBe(true);
+		expect(json.telegramMessageId).toBe(100);
+		const clipSendPhotoCalls = fetchMock.mock.calls.filter((call) => call[0] === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendPhoto`);
+		expect(clipSendPhotoCalls.length).toBe(1);
+		const clipSendMessageCalls = fetchMock.mock.calls.filter((call) => call[0] === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`);
+		expect(clipSendMessageCalls.length).toBe(1);
+		const fallbackPayload = JSON.parse(clipSendMessageCalls[0][1].body);
+		expect(fallbackPayload.chat_id).toBe('987654321');
+		expect(fallbackPayload.link_preview_options.url).toBe('https://telegra.ph/Test-05-21');
+		expect(fallbackPayload.text.startsWith('https://telegra.ph/Test-05-21')).toBe(true);
 	});
 
 	it('POST / when Telegraph fails - FNS still succeeds, no telegraphUrl in response', async () => {
@@ -1247,6 +1414,10 @@ describe('SingleFile upload entry', () => {
 				match: (url) => url === `https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendMessage`,
 				response: jsonResponse({ ok: true, result: { message_id: 102 } }),
 			},
+			{
+				match: (url) => url === `https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendPhoto`,
+				response: jsonResponse({ ok: true, result: { message_id: 555 } }),
+			},
 		]);
 
 		const request = createSingleFileRequest({ html });
@@ -1262,7 +1433,7 @@ describe('SingleFile upload entry', () => {
 		expect(fetchMock.mock.calls.some((call) => call[0] === `${mockEnv.FNS_BASE}/api/note`)).toBe(true);
 		expect(fetchMock.mock.calls.some((call) => call[0] === 'https://img.example.com/cover.jpg')).toBe(true);
 		expect(fetchMock.mock.calls.some((call) => call[0] === `https://api.telegram.org/bot${singleFileTelegraphEnv.IMG_BOT}/sendPhoto`)).toBe(true);
-		expect(fetchMock.mock.calls.some((call) => call[0] === `https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendMessage`)).toBe(true);
+		expect(fetchMock.mock.calls.some((call) => call[0] === `https://api.telegram.org/bot${singleFileTelegraphEnv.CLIP_BOT}/sendPhoto`)).toBe(true);
 		const telegraphCall = fetchMock.mock.calls.find((call) => call[0] === 'https://api.telegra.ph/createPage');
 		const telegraphPayload = JSON.parse(telegraphCall[1].body);
 		const serializedNodes = JSON.stringify(JSON.parse(telegraphPayload.content));

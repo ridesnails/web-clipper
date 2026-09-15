@@ -1,4 +1,4 @@
-import { sendPhoto, sendMessage, getFile } from './telegram.js';
+import { sendPhoto, sendMessage, getFile, sendPhotoNotification } from './telegram.js';
 import { signParam, verifyParam, timingSafeEqualStrings } from './signing.js';
 import { isPrivateHostname, isSsrfSafeUrl } from './ssrf.js';
 import { parseSingleFileUpload } from './singlefile.js';
@@ -498,6 +498,56 @@ async function clipArticle({ requestUrl, article, env, clipMethod = 'url', extra
 	);
 }
 
+// 截断到 keep 个字符并以省略号收尾；顺带避免把代理对（emoji）切成两半。
+function truncateText(text, keep) {
+	if (keep <= 0) return '';
+	let cut = text.slice(0, keep - 1);
+	const last = cut.charCodeAt(cut.length - 1);
+	if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+	return cut + '…';
+}
+
+/**
+ * 构造剪藏推送文本（Telegraph 路）。不触发截断时输出与旧内联模板字节一致。
+ * Telegram 长度上限（sendMessage 4096 / sendPhoto caption 1024）按实体解析后的
+ * 展示字符数计——href 属性与 HTML 标记不占额度，故按原始文本长度核算；
+ * 截断发生在 escapeHtml 之前，避免切出半个 HTML 实体。
+ */
+function buildClipMessage({ telegraphUrl, title, summary, tags, telegraphMode, articleUrl, maxLength = 4096 }) {
+	const escapedHead = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(title)}</b>`;
+	const escapedSource = `\n\n<a href="${escapeHtmlAttr(articleUrl)}">${escapeHtml(getHostname(articleUrl))}</a>`;
+	const escapedTail = `${telegraphMode === 'updated' ? '\n\n🔄 内容已更新' : ''}\n\n#webclipper`;
+
+	const fixedLen =
+		telegraphUrl.length +
+		2 +
+		title.length +
+		2 +
+		getHostname(articleUrl).length +
+		(telegraphMode === 'updated' ? '\n\n🔄 内容已更新'.length : 0) +
+		'\n\n#webclipper'.length;
+
+	let remaining = maxLength - fixedLen;
+	let summaryPart = summary || '';
+	if (summaryPart && summaryPart.length + 2 > remaining) {
+		summaryPart = truncateText(summaryPart, Math.max(0, remaining - 3));
+	}
+	remaining -= summaryPart ? summaryPart.length + 2 : 0;
+
+	let tagPart = formatTagLine(tags) || '';
+	if (tagPart && tagPart.length + 2 > remaining) {
+		tagPart = truncateText(tagPart, Math.max(0, remaining - 3));
+	}
+
+	return (
+		escapedHead +
+		(summaryPart ? `\n\n${escapeHtml(summaryPart)}` : '') +
+		escapedSource +
+		(tagPart ? `\n\n${escapeHtml(tagPart)}` : '') +
+		escapedTail
+	);
+}
+
 async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBody, sourceHtml, summary, tags, env, existingRecord = null }) {
 	const uploadedHtml = sourceHtml ? prepareSourceHtmlForTelegraph(sourceHtml, articleUrl) : '';
 	const fetchedHtml = uploadedHtml ? '' : await fetchSourceHtml(articleUrl);
@@ -539,11 +589,14 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 
 	let telegraphHtml = telegraphHtmlSource;
 	const publicBaseUrl = resolvePublicBaseUrl(requestUrl, env.PUBLIC_BASE_URL);
+	let coverProxyUrl = null;
 	if (publicBaseUrl) {
 		for (const mapping of imageMappings) {
 			const proxySig = await signParam(mapping.file_id, env);
 			const proxyUrl = `${publicBaseUrl}/image-proxy?file_id=${encodeURIComponent(mapping.file_id)}&sig=${proxySig}`;
 			telegraphHtml = telegraphHtml.replaceAll(mapping.raw, proxyUrl).replaceAll(mapping.absolute, proxyUrl);
+			// imageMappings 按下标保序，首个即文档序首图 → 封面候选
+			if (!coverProxyUrl) coverProxyUrl = proxyUrl;
 		}
 	} else if (imageMappings.length > 0) {
 		console.warn('Skip Telegraph image proxy replacement: no public base URL available');
@@ -575,16 +628,22 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 	}
 	const telegraphUrl = pageResult.url;
 
-	const hostname = escapeHtml(getHostname(articleUrl));
-	const sourceLink = escapeHtmlAttr(articleUrl);
-	const summaryBlock = summary ? `\n\n${escapeHtml(summary)}` : '';
-	const tagLine = formatTagLine(tags);
-	const tagBlock = tagLine ? `\n\n${escapeHtml(tagLine)}` : '';
-	const updateBlock = telegraphMode === 'updated' ? '\n\n🔄 内容已更新' : '';
-	const msgText = `${escapeHtml(telegraphUrl)}\n\n<b>${escapeHtml(
-		title
-	)}</b>${summaryBlock}\n\n<a href="${sourceLink}">${hostname}</a>${tagBlock}${updateBlock}\n\n#webclipper`;
-	const msgResult = await sendMessage(msgText, env.USER_ID || env.TELEGRAM_CHAT_ID, env, { linkPreviewUrl: telegraphUrl });
+	const msgText = buildClipMessage({ telegraphUrl, title, summary, tags, telegraphMode, articleUrl });
+
+	// 封面富通知：有公网代理封面（文档序首图）时优先 sendPhoto；失败回退 sendMessage。
+	const notifyChatId = env.USER_ID || env.TELEGRAM_CHAT_ID;
+	let msgResult = null;
+	if (coverProxyUrl) {
+		const caption = buildClipMessage({ telegraphUrl, title, summary, tags, telegraphMode, articleUrl, maxLength: 1024 });
+		try {
+			msgResult = await sendPhotoNotification(coverProxyUrl, caption, notifyChatId, env);
+		} catch (e) {
+			console.warn('sendPhoto notification failed, fallback to sendMessage:', e.message);
+		}
+	}
+	if (!msgResult) {
+		msgResult = await sendMessage(msgText, notifyChatId, env, { linkPreviewUrl: telegraphUrl });
+	}
 	const telegramMessageId = msgResult.message_id;
 
 	console.log('Telegraph/Telegram pushed:', telegraphUrl, telegraphMode, telegramMessageId);
