@@ -92,9 +92,78 @@ describe('markdownToTelegraphNodes', () => {
 		expect(result[0].children).toEqual([{ tag: 'a', attrs: { href: 'http://a.com' }, children: ['text'] }]);
 	});
 
-	it('图片 ![alt](http://img.jpg) → p 包裹 img', () => {
+	it('图片 ![alt](http://img.jpg) → 提升为 figure + figcaption（alt 为图注）', () => {
 		const result = markdownToTelegraphNodes('![alt](http://img.jpg)');
-		expect(result).toEqual([{ tag: 'p', children: [{ tag: 'img', attrs: { src: 'http://img.jpg' } }] }]);
+		expect(result).toEqual([
+			{ tag: 'figure', children: [{ tag: 'img', attrs: { src: 'http://img.jpg' } }, { tag: 'figcaption', children: ['alt'] }] },
+		]);
+	});
+
+	it('图片空 alt → figure 内仅 img，无空 figcaption', () => {
+		const result = markdownToTelegraphNodes('![](http://img.jpg)');
+		expect(result).toEqual([{ tag: 'figure', children: [{ tag: 'img', attrs: { src: 'http://img.jpg' } }] }]);
+	});
+
+	it('段落内图片 + 前后文字 → 保持 p 不提升（防内联图误变 figure）', () => {
+		const result = markdownToTelegraphNodes('text ![alt](http://img.jpg) after');
+		expect(result).toEqual([
+			{ tag: 'p', children: ['text ', { tag: 'img', attrs: { src: 'http://img.jpg' } }, ' after'] },
+		]);
+	});
+
+	it('纯嵌套引用 > > x → 扁平化为单层引用并加层级前缀', () => {
+		const result = markdownToTelegraphNodes('> > x');
+		expect(result).toEqual([{ tag: 'blockquote', children: [{ tag: 'p', children: ['› x'] }] }]);
+	});
+
+	it('混合嵌套引用（外层有文字）→ 兄弟引用块，内层加 › 前缀', () => {
+		const result = markdownToTelegraphNodes('> a\n> > b');
+		expect(result).toEqual([
+			{ tag: 'blockquote', children: [{ tag: 'p', children: ['a'] }] },
+			{ tag: 'blockquote', children: [{ tag: 'p', children: ['› b'] }] },
+		]);
+	});
+
+	it('Markdown Alerts [!NOTE] → strong 标记替代残留原文', () => {
+		const result = markdownToTelegraphNodes('> [!NOTE]\n> Useful info');
+		expect(result).toEqual([
+			{
+				tag: 'blockquote',
+				children: [{ tag: 'p', children: [{ tag: 'strong', children: ['Note'] }, 'Useful info'] }],
+			},
+		]);
+	});
+
+	it('GitHub 渲染后的 div.markdown-alert → blockquote + 加粗标题（svg 图标丢弃）', () => {
+		const html =
+			'<div class="markdown-alert markdown-alert-note" dir="auto"><p class="markdown-alert-title" dir="auto"><svg viewBox="0 0 16 16"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Z"/></svg>Note</p><p dir="auto">Body text</p></div>';
+		const result = htmlToTelegraphNodes(html);
+		expect(result).toEqual([
+			{
+				tag: 'blockquote',
+				children: [
+					{ tag: 'p', children: [{ tag: 'strong', children: ['Note'] }] },
+					{ tag: 'p', children: ['Body text'] },
+				],
+			},
+		]);
+	});
+
+	it('GitHub Alert 内嵌引用 → 标题块与 › 前缀引用块平级', () => {
+		const html =
+			'<div class="markdown-alert markdown-alert-warning" dir="auto"><p class="markdown-alert-title" dir="auto"><svg viewBox="0 0 16 16"></svg>Warning</p><blockquote dir="auto"><p dir="auto">inner quote</p></blockquote></div>';
+		const result = htmlToTelegraphNodes(html);
+		expect(result).toEqual([
+			{ tag: 'blockquote', children: [{ tag: 'p', children: [{ tag: 'strong', children: ['Warning'] }] }] },
+			{ tag: 'blockquote', children: [{ tag: 'p', children: ['› inner quote'] }] },
+		]);
+	});
+
+	it('Rouge 高亮表（gutter+code 双 td）→ 仍降级为纯净 pre>code（回归）', () => {
+		const html =
+			'<div class="highlight"><table class="rouge-table"><tbody><tr><td class="gutter gl"><pre class="lineno">1\n2\n</pre></td><td class="code"><pre>puts <span class="nb">hi</span>\n</pre></td></tr></tbody></table></div>';
+		const result = htmlToTelegraphNodes(html);
+		expect(result).toEqual([{ tag: 'pre', children: [{ tag: 'code', children: ['puts hi'] }] }]);
 	});
 
 	it('缺失 href/src 的 HTML 标签不会触发异常', () => {

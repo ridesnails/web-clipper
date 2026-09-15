@@ -302,6 +302,144 @@ function tableToPreNode(table) {
 	return { tag: 'pre', children: [lines.join('\n')] };
 }
 
+const GITHUB_ALERT_LABELS = { NOTE: 'Note', TIP: 'Tip', IMPORTANT: 'Important', WARNING: 'Warning', CAUTION: 'Caution', DANGER: 'Danger', INFO: 'Info' };
+const ALERT_MARKER_RE = /^\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION|DANGER|INFO)\]\s*/;
+
+/** 收集 element 子节点的转换结果，兼容 domToNode 返回数组（嵌套扁平化产物） */
+function collectChildNodes(element) {
+	const children = [];
+	for (const child of element.childNodes) {
+		const childNode = domToNode(child);
+		if (childNode) {
+			if (Array.isArray(childNode)) children.push(...childNode);
+			else children.push(childNode);
+		}
+	}
+	return children;
+}
+
+/**
+ * <p> 内唯一有效子元素是 <img>（无实质文本）→ 提升为 <figure>，alt 转 <figcaption> 图注。
+ * Telegraph 官方页面同款结构；p 包裹 img 在部分 App 端会被压成内联小图。
+ * @param {Element} element - <p> 元素
+ * @returns {{tag: string, children: Array}|null}
+ */
+function promoteFigureFromP(element) {
+	const meaningful = [];
+	for (const child of element.childNodes) {
+		if (child.nodeType === 3) {
+			if (child.nodeValue && child.nodeValue.trim()) return null;
+			continue;
+		}
+		if (child.nodeType !== 1) continue;
+		if (child.tagName.toLowerCase() === 'br') continue;
+		meaningful.push(child);
+	}
+	if (meaningful.length !== 1 || meaningful[0].tagName.toLowerCase() !== 'img') return null;
+	const img = meaningful[0];
+	const src = img.getAttribute('src');
+	if (!src || !isSafeUrl(src)) return null;
+	const children = [{ tag: 'img', attrs: { src } }];
+	const alt = String(img.getAttribute('alt') || '').trim();
+	if (alt) children.push({ tag: 'figcaption', children: [alt] });
+	return { tag: 'figure', children };
+}
+
+/** GitHub Alerts 标记（Markdown 源）：blockquote 首个 p 的 [!TYPE] 前缀 → 加粗类型词 */
+function transformAlertMarker(node) {
+	if (!node || node.tag !== 'blockquote' || !Array.isArray(node.children)) return node;
+	const firstP = node.children[0];
+	if (!firstP || firstP.tag !== 'p' || !Array.isArray(firstP.children)) return node;
+	const idx = firstP.children.findIndex((c) => typeof c === 'string');
+	if (idx < 0) return node;
+	const text = firstP.children[idx];
+	const m = text.match(ALERT_MARKER_RE);
+	if (!m) return node;
+	const rest = text.slice(m[0].length);
+	const body = [...firstP.children];
+	if (rest) body[idx] = rest;
+	else body.splice(idx, 1);
+	firstP.children = [{ tag: 'strong', children: [GITHUB_ALERT_LABELS[m[1]]] }, ...body];
+	return node;
+}
+
+/** 深度优先找第一个非空文本节点并加前缀（用于标记被扁平化的嵌套引用层级） */
+function prefixFirstText(node, prefix) {
+	if (Array.isArray(node)) {
+		for (const item of node) {
+			if (prefixFirstText(item, prefix)) return true;
+		}
+		return false;
+	}
+	if (!node || typeof node !== 'object' || !Array.isArray(node.children)) return false;
+	for (let i = 0; i < node.children.length; i++) {
+		const child = node.children[i];
+		if (typeof child === 'string') {
+			if (!child.trim()) continue;
+			node.children[i] = prefix + child;
+			return true;
+		}
+		if (prefixFirstText(child, prefix)) return true;
+	}
+	return false;
+}
+
+const isBlockquoteNode = (c) => c && typeof c === 'object' && !Array.isArray(c) && c.tag === 'blockquote';
+
+/**
+ * 嵌套 blockquote → 扁平化为兄弟引用块：外层内容留在原 bq，
+ * 内层 bq 提为平级并在首个文本前加 "› " 前缀标记层级（Telegraph App 端不支持嵌套引用渲染）。
+ * @param {Array} children - 已转换的子节点
+ * @returns {{tag: string, children: Array}|Array}
+ */
+function blockquoteFromChildren(children) {
+	if (!children.some(isBlockquoteNode)) return { tag: 'blockquote', children };
+	const result = [];
+	const outer = children.filter((c) => !isBlockquoteNode(c));
+	if (outer.length) result.push({ tag: 'blockquote', children: outer });
+	for (const bq of children) {
+		if (!isBlockquoteNode(bq)) continue;
+		prefixFirstText(bq, '› ');
+		result.push(bq);
+	}
+	return result.length === 1 ? result[0] : result;
+}
+
+/** blockquote 统一出口：子节点收集 → 嵌套扁平化 → Alerts 标记语义化 */
+function transformBlockquote(element) {
+	const flattened = blockquoteFromChildren(collectChildNodes(element));
+	if (Array.isArray(flattened)) {
+		const [first, ...rest] = flattened;
+		return [transformAlertMarker(first), ...rest];
+	}
+	return transformAlertMarker(flattened);
+}
+
+/**
+ * GitHub 渲染后的 Alerts HTML（div.markdown-alert）→ blockquote + 加粗标题行。
+ * 标题 p.markdown-alert-title 内含 svg 图标，取 textContent 即纯标题词。
+ * @param {Element} element - div.markdown-alert 元素
+ */
+function githubAlertToNode(element) {
+	const nodes = [];
+	for (const child of element.childNodes) {
+		if (child.nodeType !== 1) continue;
+		if (child.tagName.toLowerCase() === 'p' && String(child.getAttribute('class') || '').includes('markdown-alert-title')) {
+			const title = String(child.textContent || '').trim();
+			if (title) nodes.push({ tag: 'p', children: [{ tag: 'strong', children: [title] }] });
+			continue;
+		}
+		const converted = domToNode(child);
+		if (converted) {
+			if (Array.isArray(converted)) nodes.push(...converted);
+			else nodes.push(converted);
+		}
+	}
+	if (!nodes.length) return null;
+	const flattened = blockquoteFromChildren(nodes);
+	return Array.isArray(flattened) ? flattened : transformAlertMarker(flattened);
+}
+
 function domToNode(element) {
 	if (!element) return null;
 	if (element.nodeType === 3) {
@@ -327,6 +465,11 @@ function domToNode(element) {
 		return tableToPreNode(element);
 	}
 
+	// GitHub 渲染后的 Alerts：div.markdown-alert → blockquote + 加粗标题行（svg 图标丢弃）
+	if (rawTag === 'div' && String(element.getAttribute('class') || '').includes('markdown-alert')) {
+		return githubAlertToNode(element);
+	}
+
 	if (!SUPPORTED_TAGS.has(tag)) {
 		const children = [];
 		for (const child of element.childNodes) {
@@ -337,6 +480,17 @@ function domToNode(element) {
 			}
 		}
 		return children.length ? children : null;
+	}
+
+	// p 内唯一有效子元素是 img → 提升为 figure + figcaption（Telegraph 官方图注结构）
+	if (tag === 'p') {
+		const figure = promoteFigureFromP(element);
+		if (figure) return figure;
+	}
+
+	// blockquote 统一出口：嵌套扁平化（Telegraph App 端不渲染嵌套引用）+ Alerts 标记语义化
+	if (tag === 'blockquote') {
+		return transformBlockquote(element);
 	}
 
 	const node = { tag };
