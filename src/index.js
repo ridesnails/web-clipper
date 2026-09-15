@@ -658,8 +658,13 @@ async function pushTelegraphAndTelegram({ requestUrl, articleUrl, title, cleanBo
 	let msgResult = null;
 	if (coverProxyUrl) {
 		const caption = buildClipMessage({ telegraphUrl, title, summary, tags, telegraphMode, articleUrl, maxLength: 1024 });
+		// 通知 URL 追加一次性查询参数，绕过按 URL 缓存的旧响应（2026-09-16 实测：
+		// 同一 file_id 在 CT 修复部署前曾被 Telegram 抓取器缓存为 octet-stream 响应，
+		// 导致 sendPhoto URL 模式仍报 "failed to get HTTP URL content"；加 &cb=nonce
+		// 后立即恢复。image-proxy 仅校验 file_id+sig，额外参数不影响签名）。
+		const notifyPhotoUrl = `${coverProxyUrl}&cb=${Date.now().toString(36)}`;
 		try {
-			msgResult = await sendPhotoNotification(coverProxyUrl, caption, notifyChatId, env);
+			msgResult = await sendPhotoNotification(notifyPhotoUrl, caption, notifyChatId, env);
 		} catch (e) {
 			console.warn('sendPhoto notification failed, fallback to sendMessage:', e.message);
 		}

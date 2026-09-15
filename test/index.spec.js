@@ -967,6 +967,8 @@ Body.`;
 		const notifyPayload = JSON.parse(clipSendPhotoCalls[0][1].body);
 		expect(notifyPayload.chat_id).toBe('987654321');
 		expect(notifyPayload.photo.startsWith(`${telegraphPublicBaseUrl}/image-proxy?file_id=photo-file-1&sig=`)).toBe(true);
+		// 通知 URL 带一次性 cache-buster（&cb=），规避 Telegram 抓取器按 URL 缓存的旧 octet-stream 响应
+		expect(/&cb=[a-z0-9]+$/.test(notifyPayload.photo)).toBe(true);
 		expect(notifyPayload.caption.startsWith('https://telegra.ph/Test-05-21')).toBe(true);
 		expect(notifyPayload.parse_mode).toBe('HTML');
 		const clipSendMessageCalls = fetchMock.mock.calls.filter((call) => call[0] === `https://api.telegram.org/bot${telegraphEnv.CLIP_BOT}/sendMessage`);
