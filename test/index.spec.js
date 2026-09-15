@@ -1194,6 +1194,68 @@ describe('Image proxy route', () => {
 		expect(response.headers.get('Cache-Control')).toContain('max-age=86400');
 	});
 
+	it('GET /image-proxy - rewrites octet-stream to image/* by file_path extension (Telegram file server always serves octet-stream)', async () => {
+		fetchMock
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: {
+							file_path: 'photos/file_124.jpg',
+						},
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(
+				new Response(new Uint8Array([1, 2, 3]), {
+					status: 200,
+					headers: { 'Content-Type': 'application/octet-stream' },
+				}),
+			);
+
+		const sig = await signParam('cover-jpg', mockEnv);
+		const request = new Request(`http://example.com/image-proxy?file_id=cover-jpg&sig=${sig}`);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		// 上游 octet-stream 会被 sendPhoto URL 模式拒收（failed to get HTTP URL content），
+		// 必须按 file_path 扩展名推导 image/*。
+		expect(response.headers.get('Content-Type')).toBe('image/jpeg');
+	});
+
+	it('GET /image-proxy - passes through upstream image/* content type untouched', async () => {
+		fetchMock
+			.mockResolvedValueOnce(
+				new Response(
+					JSON.stringify({
+						ok: true,
+						result: {
+							file_path: 'photos/file_9.png',
+						},
+					}),
+					{ status: 200 },
+				),
+			)
+			.mockResolvedValueOnce(
+				new Response(new Uint8Array([4, 5, 6]), {
+					status: 200,
+					headers: { 'Content-Type': 'image/png' },
+				}),
+			);
+
+		const sig = await signParam('cover-png', mockEnv);
+		const request = new Request(`http://example.com/image-proxy?file_id=cover-png&sig=${sig}`);
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, mockEnv, ctx);
+		await waitOnExecutionContext(ctx);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get('Content-Type')).toBe('image/png');
+	});
+
 	it('GET /image-proxy without file_id - returns 400', async () => {
 		const request = new Request('http://example.com/image-proxy');
 		const ctx = createExecutionContext();

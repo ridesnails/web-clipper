@@ -105,6 +105,29 @@ export { isValidUrl } from './utils.js';
 export { extractTitle, cleanJinaBody, stripEmptyLinks } from './jina.js';
 export { makeSlug, buildNote } from './note.js';
 
+const IMAGE_EXT_CONTENT_TYPES = {
+	jpg: 'image/jpeg',
+	jpeg: 'image/jpeg',
+	png: 'image/png',
+	webp: 'image/webp',
+	gif: 'image/gif',
+	avif: 'image/avif',
+	bmp: 'image/bmp',
+	heic: 'image/heic',
+};
+
+// Telegram 文件服务器的下载响应恒为 application/octet-stream（2026-09-16 实测），
+// 直接透传会让 sendPhoto 的 URL 模式拒绝抓取（"failed to get HTTP URL content"，
+// 通知被迫降级 sendMessage）。上游若已给出 image/* 则优先透传，否则按
+// file_path 扩展名推导，兜底 image/jpeg。
+function resolveProxyContentType(upstreamContentType, filePath) {
+	if (upstreamContentType && upstreamContentType.toLowerCase().startsWith('image/')) {
+		return upstreamContentType;
+	}
+	const ext = String(filePath || '').split('.').pop()?.toLowerCase() || '';
+	return IMAGE_EXT_CONTENT_TYPES[ext] || 'image/jpeg';
+}
+
 async function handleImageProxy(request, env) {
 	const requestUrl = new URL(request.url);
 	const fileId = requestUrl.searchParams.get('file_id');
@@ -122,7 +145,7 @@ async function handleImageProxy(request, env) {
 		}
 		return new Response(fileRes.body, {
 			headers: {
-				'Content-Type': fileRes.headers.get('Content-Type') || 'image/jpeg',
+				'Content-Type': resolveProxyContentType(fileRes.headers.get('Content-Type'), fileInfo.file_path),
 				'Cache-Control': 'public, max-age=86400',
 			},
 		});
